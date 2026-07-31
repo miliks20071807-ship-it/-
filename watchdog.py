@@ -34,6 +34,7 @@ from agents.common import notify_telegram
 REPO_ROOT = Path(__file__).parent
 HEARTBEAT_FILE = REPO_ROOT / "heartbeat.txt"
 PID_FILE = REPO_ROOT / "bot.pid"
+WATCHDOG_HEARTBEAT_FILE = REPO_ROOT / "watchdog_heartbeat.txt"
 STALE_AFTER_SECONDS = 180  # запас у 3x heartbeat-інтервал бота (60с)
 
 
@@ -78,6 +79,11 @@ def restart_bot() -> None:
 
 
 def check_once() -> None:
+    # Пишеться на кожному запуску, незалежно від результату — саме
+    # за цим файлом /статус_агентів у bot.py визначає, чи системний
+    # cron взагалі викликає watchdog (а не лише чи живий бот).
+    WATCHDOG_HEARTBEAT_FILE.write_text(datetime.now(timezone.utc).isoformat())
+
     age = _read_heartbeat_age_seconds()
     alive = _bot_running()
 

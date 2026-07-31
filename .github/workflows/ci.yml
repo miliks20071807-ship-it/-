@@ -31,16 +31,28 @@ jobs:
       # .github/workflows/bugfix-agent.yml. Дедуп: не плодимо issue,
       # якщо відкрита така сама вже є.
       - name: Open bug issue on failure (main only)
+        id: bug_issue
         if: failure() && github.ref == 'refs/heads/main'
         run: |
           existing=$(gh issue list --label bug --state open --search "CI failure on main" --json number --jq '.[0].number')
           if [ -z "$existing" ]; then
-            gh issue create \
+            url=$(gh issue create \
               --title "CI failure on main ($(date -u +%Y-%m-%dT%H:%MZ))" \
               --label bug \
-              --body "Тести/лінт впали на main у ${{ github.sha }}. Деталі: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              --body "Тести/лінт впали на main у ${{ github.sha }}. Деталі: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+            echo "opened_url=$url" >> "$GITHUB_OUTPUT"
           else
             echo "Issue #$existing вже відкрита, не дублюю."
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Telegram: CI впав, відкрито issue"
+        if: steps.bug_issue.outputs.opened_url
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          ISSUE_URL: ${{ steps.bug_issue.outputs.opened_url }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔥 CI впав на main, відкрито issue для багфікс-агента: ${ISSUE_URL}"

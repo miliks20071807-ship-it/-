@@ -9,6 +9,13 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ISSUE_NUMBER: ${{ github.event.issue.number }}
+
 jobs:
   fix:
     if: contains(github.event.issue.labels.*.name, 'bug')
@@ -29,10 +36,86 @@ jobs:
           git config user.name "bugfix-agent"
           git config user.email "bugfix-agent@users.noreply.github.com"
 
-      - name: Run bugfix agent
-        run: python agents/bugfix_agent.py ${{ github.event.issue.number }}
+      - name: "Telegram: почав аналіз issue"
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🐞 Багфікс-агент почав аналіз issue #${ISSUE_NUMBER}"
+
+      - name: Пропозиція фіксу
+        id: propose
+        run: python agents/bugfix_agent.py propose "${ISSUE_NUMBER}"
+
+      - name: "Telegram: не зміг визначити фікс"
+        if: steps.propose.outputs.has_fix != 'true'
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          EXPLANATION: ${{ steps.propose.outputs.explanation }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🤷 Багфікс-агент не зміг впевнено визначити фікс для issue #${ISSUE_NUMBER}: ${EXPLANATION}"
+
+      - name: "Issue: коментар (фікс не знайдено)"
+        if: steps.propose.outputs.has_fix != 'true'
+        env:
+          EXPLANATION: ${{ steps.propose.outputs.explanation }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "${EXPLANATION}"
+
+      - name: "Telegram: фікс знайдено"
+        if: steps.propose.outputs.has_fix == 'true'
+        continue-on-error: true
+        env:
+          FILE: ${{ steps.propose.outputs.file }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔧 Багфікс-агент: знайшов правку у ${FILE}, ганяю тести"
+
+      - name: Тести
+        id: test
+        if: steps.propose.outputs.has_fix == 'true'
+        run: python agents/bugfix_agent.py test
+
+      - name: Відкинути зміни (тести не пройшли)
+        if: steps.propose.outputs.has_fix == 'true' && steps.test.outputs.passed != 'true'
+        run: git checkout -- .
+
+      - name: "Telegram: тести не пройшли"
+        if: steps.propose.outputs.has_fix == 'true' && steps.test.outputs.passed != 'true'
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "❌ Багфікс-агент: тести не пройшли після фіксу, зміни відкинуто. Issue #${ISSUE_NUMBER} лишається відкритою"
+
+      - name: "Issue: коментар (тести не пройшли)"
+        if: steps.propose.outputs.has_fix == 'true' && steps.test.outputs.passed != 'true'
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "Автоматична спроба фіксу не пройшла тести, зміни відкинуто. Потрібне ручне втручання."
+
+      - name: Відкрити PR
+        id: pr
+        if: steps.propose.outputs.has_fix == 'true' && steps.test.outputs.passed == 'true'
+        env:
+          FILE: ${{ steps.propose.outputs.file }}
+          EXPLANATION: ${{ steps.propose.outputs.explanation }}
+        run: python agents/bugfix_agent.py open-pr "${ISSUE_NUMBER}" "${FILE}" "${EXPLANATION}"
+
+      # Багфікс-агент НІКОЛИ не мерджить сам — завжди кнопки
+      # "Затвердити"/"Відхилити" в Telegram, незалежно від тривіальності.
+      - name: "Telegram: PR на підтвердження"
+        if: steps.pr.outputs.pr_number
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          EXPLANATION: ${{ steps.propose.outputs.explanation }}
+        run: |
+          TEXT="🐞 Багфікс-агент відкрив PR для issue #${ISSUE_NUMBER} — потрібне ручне підтвердження
+          ${PR_URL}
+
+          ${EXPLANATION}"
+          bash .github/scripts/telegram_notify.sh approve "$TEXT" "${PR_NUMBER}"
+
+      - name: "Telegram: аварійне завершення"
+        if: failure()
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔥 Багфікс-агент завершився з помилкою на issue #${ISSUE_NUMBER}. Деталі: ${RUN_URL}"

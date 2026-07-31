@@ -2,25 +2,31 @@
 Деплой-агент.
 
 Запускається по крону (GitHub Actions, раз на годину — див.
-.github/workflows/deploy-agent.yml). Логіка:
+.github/workflows/deploy-agent.yml) як послідовність окремих кроків
+workflow (не один монолітний прогін) — так кожен крок може одразу
+відзвітувати в Telegram через curl (.github/scripts/telegram_notify.sh),
+навіть якщо наступний крок впаде.
 
-  1. Пробує авто-виправити дрібні проблеми (ruff --fix).
-  2. Якщо після фіксу є diff — ганяє тести.
-     - Тести червоні -> відкидає зміни, нічого не мерджить і не пушить,
-       лише лог (за живі помилки відповідає багфікс-агент, не цей).
-     - Тести зелені -> відкриває PR.
-  3. Просить Claude оцінити, чи PR "тривіальний і некритичний"
-     (форматування, лінт, залежності і т.п.) — і ЛИШЕ якщо так І тести
-     зелені, автомерджить. Це єдиний агент у системі, якому дозволено
-     автомердж (рішення команди). У решті випадків PR лишається
-     відкритим і йде повідомлення в Telegram на ручне підтвердження.
+Підкоманди (кожна — окремий крок у deploy-agent.yml):
+  autofix    — ruff --fix, виводить has_changes=true|false
+  test       — pytest, виводить passed=true|false
+  open-pr    — Claude оцінює diff на "тривіальність", коммітить,
+               пушить, відкриває PR; виводить pr_number/pr_url/trivial/reason
+  merge-pr <pr_number> — squash-мердж (лише для тривіальних PR); виводить merged=true|false
+
+Автомердж робиться ЛИШЕ якщо Claude визнав зміну тривіальною І тести
+зелені — це єдиний агент системи з таким правом (рішення команди). В
+усіх інших випадках workflow сам (через telegram_notify.sh approve)
+шле повідомлення з кнопками "Затвердити"/"Відхилити"; натискання
+обробляє bot.py через GitHub API (agents.common.merge_pr/close_pr).
 
 Ніколи не пушить і не мерджить напряму в main поза цим PR-флоу.
 
-Тестування без реального GitHub-репозиторію:
-    python agents/deploy_agent.py --dry-run
-(виконає кроки 1-2, але замість git push / gh pr create лише
-надрукує, що б сталось).
+Локальний тест без реального GitHub-репозиторію:
+    python agents/deploy_agent.py autofix
+    python agents/deploy_agent.py test
+(open-pr/merge-pr вимагають git remote + gh auth, тому для локальної
+перевірки логіки достатньо перших двох кроків.)
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.common import gh, notify_telegram, run
+from agents.common import gh, run, run_tests, set_output
 
 MODEL = "claude-sonnet-5"
 
@@ -73,43 +79,22 @@ def has_pending_changes() -> bool:
     return bool(result.stdout.strip())
 
 
-def run_autofix() -> None:
+def cmd_autofix(_args: argparse.Namespace) -> int:
     run(["ruff", "check", "--fix", "."], check=False)
+    set_output("has_changes", "true" if has_pending_changes() else "false")
+    return 0
 
 
-def run_tests() -> bool:
-    result = run(["pytest", "-q"], check=False)
-    print(result.stdout)
-    print(result.stderr)
-    return result.returncode == 0
+def cmd_test(_args: argparse.Namespace) -> int:
+    set_output("passed", "true" if run_tests() else "false")
+    return 0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="не пушити і не відкривати PR, лише показати план")
-    args = parser.parse_args()
-
-    run_autofix()
-
-    if not has_pending_changes():
-        print("Деплой-агент: нічого виправляти, репозиторій чистий.")
-        return 0
-
+def cmd_open_pr(_args: argparse.Namespace) -> int:
     diff_text = run(["git", "diff"], check=False).stdout
-
-    if not run_tests():
-        print("Деплой-агент: тести червоні після автофіксу — відкидаю зміни, PR не відкриваю.")
-        run(["git", "checkout", "--", "."], check=False)
-        return 1
-
-    branch = f"deploy-agent/auto-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     assessment = assess_diff(diff_text)
 
-    if args.dry_run:
-        print(f"[dry-run] створив би гілку {branch}, відкрив PR, trivial={assessment['trivial']} ({assessment['reason']})")
-        run(["git", "checkout", "--", "."], check=False)
-        return 0
-
+    branch = f"deploy-agent/auto-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     run(["git", "checkout", "-b", branch])
     run(["git", "commit", "-am", "deploy-agent: автофікс лінту/форматування"])
     run(["git", "push", "origin", branch])
@@ -122,23 +107,41 @@ def main() -> int:
         "--head", branch,
     )
     pr_url = pr.stdout.strip()
+    pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
 
-    if assessment["trivial"]:
-        merge = gh("pr", "merge", branch, "--squash", "--delete-branch", check=False)
-        if merge.returncode == 0:
-            notify_telegram(f"🚀 Деплой-агент: автомердж тривіального PR\n{pr_url}\n\n{assessment['reason']}")
-        else:
-            notify_telegram(
-                f"⚠️ Деплой-агент: PR оцінено як тривіальний, але автомердж не вдався "
-                f"(можливо, потрібен review за правилами репо). Потрібне ручне підтвердження:\n{pr_url}\n\n{merge.stderr}"
-            )
-    else:
-        notify_telegram(
-            f"🔍 Деплой-агент відкрив PR, що потребує ручного підтвердження:\n{pr_url}\n\n"
-            f"Причина не автомерджити: {assessment['reason']}"
-        )
-
+    set_output("pr_number", pr_number)
+    set_output("pr_url", pr_url)
+    set_output("trivial", "true" if assessment["trivial"] else "false")
+    set_output("reason", assessment["reason"])
     return 0
+
+
+def cmd_merge_pr(args: argparse.Namespace) -> int:
+    merge = gh("pr", "merge", args.pr_number, "--squash", "--delete-branch", check=False)
+    set_output("merged", "true" if merge.returncode == 0 else "false")
+    set_output("merge_error", merge.stderr.strip())
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("autofix")
+    sub.add_parser("test")
+    sub.add_parser("open-pr")
+
+    p_merge = sub.add_parser("merge-pr")
+    p_merge.add_argument("pr_number")
+
+    args = parser.parse_args()
+    handlers = {
+        "autofix": cmd_autofix,
+        "test": cmd_test,
+        "open-pr": cmd_open_pr,
+        "merge-pr": cmd_merge_pr,
+    }
+    return handlers[args.command](args)
 
 
 if __name__ == "__main__":

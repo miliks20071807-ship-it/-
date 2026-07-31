@@ -8,6 +8,8 @@ MVP Telegram-бот команди: /задача, /задачі, /done, і зв
     python bot.py
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -17,11 +19,18 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import ErrorEvent, FSInputFile, Message
+from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, Message
 from dotenv import load_dotenv
 
 import storage
-from agents.common import create_github_issue, notify_telegram
+from agents.common import (
+    close_pr,
+    create_github_issue,
+    get_last_workflow_run,
+    list_open_agent_prs,
+    merge_pr,
+    notify_telegram,
+)
 from orchestrator import classify
 from presentation import build_report
 
@@ -33,7 +42,11 @@ log = logging.getLogger("team-bot")
 ERRORS_LOG = Path(__file__).parent / "errors.log"
 HEARTBEAT_FILE = Path(__file__).parent / "heartbeat.txt"
 PID_FILE = Path(__file__).parent / "bot.pid"
+WATCHDOG_HEARTBEAT_FILE = Path(__file__).parent / "watchdog_heartbeat.txt"
 HEARTBEAT_INTERVAL_SECONDS = 60
+WATCHDOG_STALE_AFTER_SECONDS = 900  # запас у 3x типовий cron-інтервал watchdog (5 хв)
+
+DEPLOY_WORKFLOW_FILE = "deploy-agent.yml"
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_USER_IDS = {
@@ -68,12 +81,39 @@ async def handle_error(event: ErrorEvent):
         notify_telegram(f"⚠️ Помилка в боті (issue не відкрито — GITHUB_TOKEN не налаштовано):\n{type(event.exception).__name__}: {event.exception}")
 
 
-def is_allowed(message: Message) -> bool:
+def is_allowed_user(user_id: int) -> bool:
     # Якщо список не заданий — бот відкритий для всіх (зручно на тесті,
     # але для проду обов'язково заповніть ALLOWED_USER_IDS в .env).
     if not ALLOWED_USER_IDS:
         return True
-    return message.from_user.id in ALLOWED_USER_IDS
+    return user_id in ALLOWED_USER_IDS
+
+
+def is_allowed(message: Message) -> bool:
+    return is_allowed_user(message.from_user.id)
+
+
+@dp.callback_query(F.data.startswith("pr:"))
+async def handle_pr_callback(callback: CallbackQuery):
+    """Крок з доповнення архітектури: людина підтверджує чи відхиляє
+    PR деплой/багфікс-агента прямо кнопкою в Telegram, без заходу на
+    GitHub. merge_pr/close_pr працюють через GitHub REST API — боту
+    для цього потрібен GITHUB_TOKEN з правом на merge PR (див. env.example)."""
+    if not is_allowed_user(callback.from_user.id):
+        return await callback.answer("Немає доступу.", show_alert=True)
+
+    _, action, pr_number = callback.data.split(":", 2)
+
+    if action == "approve":
+        ok, detail = merge_pr(int(pr_number))
+        outcome = f"✅ PR #{pr_number} замерджено" if ok else f"⚠️ Не вдалось замерджити PR #{pr_number}: {detail}"
+    else:
+        ok, detail = close_pr(int(pr_number))
+        outcome = f"❌ PR #{pr_number} відхилено" if ok else f"⚠️ Не вдалось закрити PR #{pr_number}: {detail}"
+
+    original_text = callback.message.text or ""
+    await callback.message.edit_text(f"{original_text}\n\n— {outcome} ({callback.from_user.full_name})")
+    await callback.answer(outcome)
 
 
 @dp.message(CommandStart())
@@ -83,7 +123,8 @@ async def cmd_start(message: Message):
         "/задача <текст> — додати задачу\n"
         "/задачі — показати відкриті задачі\n"
         "/done <id> — позначити задачу виконаною\n"
-        "/презентація [днів|all] — звіт по задачах команди (pptx)\n\n"
+        "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
+        "/статус_агентів — стан деплой-агента, відкритих PR і watchdog\n\n"
         "Або просто напиши повідомлення — я сам розберусь, задача це чи ні."
     )
 
@@ -140,6 +181,52 @@ async def cmd_presentation(message: Message):
     await message.answer("Генерую презентацію...")
     path = build_report(days=days)
     await message.answer_document(FSInputFile(path), caption="Звіт команди готовий 📊")
+
+
+def _file_age_seconds(path: Path) -> float | None:
+    if not path.exists():
+        return None
+    try:
+        ts = datetime.fromisoformat(path.read_text().strip())
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+@dp.message(Command("статус_агентів"))
+async def cmd_agents_status(message: Message):
+    """Крок з доповнення архітектури: короткий звіт по всій системі
+    агентів прямо в Telegram, щоб не заходити на GitHub навіть подивитись."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    lines = ["📊 Статус агентів:"]
+
+    last_run = get_last_workflow_run(DEPLOY_WORKFLOW_FILE)
+    if last_run:
+        lines.append(
+            f"🚀 Деплой-агент: останній запуск {last_run['created_at']} — "
+            f"{last_run['conclusion'] or last_run['status']}"
+        )
+    else:
+        lines.append("🚀 Деплой-агент: даних немає (перевір GITHUB_TOKEN/GITHUB_REPOSITORY на боті)")
+
+    open_prs = list_open_agent_prs()
+    if open_prs:
+        pr_lines = "\n".join(f"  • #{pr['number']} {pr['title']}" for pr in open_prs)
+        lines.append(f"🔍 Відкритих PR на підтвердження: {len(open_prs)}\n{pr_lines}")
+    else:
+        lines.append("🔍 Відкритих PR на підтвердження: 0")
+
+    watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
+    if watchdog_age is None:
+        lines.append("🐕 Watchdog: даних немає (ще не запускався на цьому хості)")
+    elif watchdog_age < WATCHDOG_STALE_AFTER_SECONDS:
+        lines.append(f"🐕 Watchdog: живий (остання перевірка {int(watchdog_age)}с тому)")
+    else:
+        lines.append(f"🐕 Watchdog: НЕ запускався {int(watchdog_age)}с — перевір системний cron")
+
+    await message.answer("\n".join(lines))
 
 
 @dp.message(F.text)

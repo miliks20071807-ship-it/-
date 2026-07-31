@@ -8,22 +8,28 @@
   2. Помилка в проді (виняток у bot.py) -> bot.py створює issue з лейблом
      "bug" напряму через GitHub API (agents.common.create_github_issue).
 
-У обох випадках відкриття issue з лейблом "bug" тригерить bugfix-agent.yml,
-який запускає цей скрипт з номером issue.
+Як і деплой-агент, працює як послідовність окремих кроків workflow
+(не один монолітний прогін), щоб кожен крок міг одразу відзвітувати в
+Telegram через curl (.github/scripts/telegram_notify.sh):
 
-Логіка:
-  1. Читає issue (заголовок, тіло — там стектрейс/опис).
-  2. Дає Claude весь .py-код репозиторію + текст issue, просить
-     запропонувати виправлення ОДНОГО файлу (повний новий вміст файлу,
-     не патч — простіше і надійніше застосувати без бібліотек diff/patch).
-  3. Застосовує, ганяє тести.
-     - Тести червоні -> відкидає зміни, коментує в issue, що не зміг
-       безпечно виправити автоматично, і сповіщає Telegram — issue
-       лишається відкритою для людини.
-     - Тести зелені -> відкриває PR з посиланням "Fixes #N".
-  4. ЗАВЖДИ (незалежно від тривіальності) лишає PR на ручне
-     підтвердження в Telegram — багфікс-агент не має права автомерджити
-     (рішення команди: автомердж лише в деплой-агента).
+  propose <issue_number> — Claude читає issue + весь .py-код репо,
+      пропонує фікс ОДНОГО файлу (повний новий вміст, не патч —
+      простіше і надійніше застосувати без бібліотек diff/patch);
+      виводить has_fix/file/explanation
+  test — той самий крок, що й у деплой-агента (agents.common.run_tests)
+  open-pr <issue_number> <file> <explanation> — коммітить, пушить,
+      відкриває PR "Fixes #N"; виводить pr_number/pr_url
+
+Багфікс-агент НІКОЛИ не мерджить сам (навіть тривіальні фікси) —
+workflow завжди шле повідомлення з кнопками "Затвердити"/"Відхилити"
+(рішення команди: автомердж лише в деплой-агента). Якщо тести після
+фіксу червоні — workflow відкидає зміни (`git checkout -- .`) і лишає
+issue відкритою для людини.
+
+Локальний тест без реального GitHub-репозиторію:
+    python agents/bugfix_agent.py propose <номер-issue>
+(відкриє issue через gh, застосує фікс у робочу директорію, не пушить
+і не створює PR — це вже наступні кроки).
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from pathlib import Path
 from anthropic import Anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.common import gh, notify_telegram, run
+from agents.common import gh, run, run_tests, set_output
 
 MODEL = "claude-sonnet-5"
 REPO_ROOT = Path(__file__).parent.parent
@@ -93,72 +99,72 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
     return result
 
 
-def run_tests() -> bool:
-    result = run(["pytest", "-q"], check=False)
-    print(result.stdout)
-    print(result.stderr)
-    return result.returncode == 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("issue_number", type=int)
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-
+def cmd_propose(args: argparse.Namespace) -> int:
     issue = json.loads(gh("issue", "view", str(args.issue_number), "--json", "title,body,url").stdout)
     fix = propose_fix(issue["title"], issue.get("body") or "")
 
+    set_output("issue_url", issue["url"])
+    set_output("explanation", fix["explanation"])
+
     if not fix["file"]:
-        msg = f"🐞 Багфікс-агент не зміг впевнено виправити issue #{args.issue_number} автоматично: {fix['explanation']}\n{issue['url']}"
-        notify_telegram(msg)
-        if not args.dry_run:
-            gh("issue", "comment", str(args.issue_number), "--body", fix["explanation"] or "Не вдалось автоматично визначити фікс.")
+        set_output("has_fix", "false")
         return 0
 
     target = REPO_ROOT / fix["file"]
-    original = target.read_text(encoding="utf-8") if target.exists() else None
-
-    if args.dry_run:
-        print(f"[dry-run] змінив би {fix['file']}: {fix['explanation']}")
-        return 0
-
     target.write_text(fix["new_content"], encoding="utf-8")
+    set_output("has_fix", "true")
+    set_output("file", fix["file"])
+    return 0
 
-    if not run_tests():
-        print("Багфікс-агент: тести червоні після фіксу — відкидаю зміни.")
-        if original is not None:
-            target.write_text(original, encoding="utf-8")
-        else:
-            target.unlink(missing_ok=True)
-        notify_telegram(
-            f"🐞 Багфікс-агент спробував виправити issue #{args.issue_number}, "
-            f"але тести не пройшли — зміни відкинуто, потрібне ручне втручання.\n{issue['url']}"
-        )
-        gh("issue", "comment", str(args.issue_number),
-           "--body", f"Автоматична спроба фіксу не пройшла тести:\n\n{fix['explanation']}")
-        return 1
 
+def cmd_test(_args: argparse.Namespace) -> int:
+    set_output("passed", "true" if run_tests() else "false")
+    return 0
+
+
+def cmd_open_pr(args: argparse.Namespace) -> int:
     branch = f"bugfix-agent/issue-{args.issue_number}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     run(["git", "checkout", "-b", branch])
-    run(["git", "add", fix["file"]])
+    run(["git", "add", args.file])
     run(["git", "commit", "-m", f"bugfix-agent: fix for #{args.issue_number}"])
     run(["git", "push", "origin", branch])
 
     pr = gh(
         "pr", "create",
         "--title", f"bugfix-agent: fix #{args.issue_number}",
-        "--body", f"Fixes #{args.issue_number}\n\n{fix['explanation']}",
+        "--body", f"Fixes #{args.issue_number}\n\n{args.explanation}",
         "--base", "main",
         "--head", branch,
     )
     pr_url = pr.stdout.strip()
+    pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
 
-    notify_telegram(
-        f"🐞 Багфікс-агент відкрив PR для issue #{args.issue_number} — "
-        f"потрібне ручне підтвердження (багфікси автомердж не роблять):\n{pr_url}\n\n{fix['explanation']}"
-    )
+    set_output("pr_number", pr_number)
+    set_output("pr_url", pr_url)
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_propose = sub.add_parser("propose")
+    p_propose.add_argument("issue_number")
+
+    sub.add_parser("test")
+
+    p_open = sub.add_parser("open-pr")
+    p_open.add_argument("issue_number")
+    p_open.add_argument("file")
+    p_open.add_argument("explanation")
+
+    args = parser.parse_args()
+    handlers = {
+        "propose": cmd_propose,
+        "test": cmd_test,
+        "open-pr": cmd_open_pr,
+    }
+    return handlers[args.command](args)
 
 
 if __name__ == "__main__":

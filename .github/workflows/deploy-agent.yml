@@ -9,6 +9,12 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
 jobs:
   scan-and-pr:
     runs-on: ubuntu-latest
@@ -28,10 +34,93 @@ jobs:
           git config user.name "deploy-agent"
           git config user.email "deploy-agent@users.noreply.github.com"
 
-      - name: Run deploy agent
-        run: python agents/deploy_agent.py
+      # --- Кожен крок нижче одразу шле статус у Telegram через curl —
+      # так весь прогрес видно без заходу на GitHub. ---
+      - name: "Telegram: почав перевірку"
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🚀 Деплой-агент почав перевірку репозиторію"
+
+      - name: Автофікс (ruff)
+        id: autofix
+        run: python agents/deploy_agent.py autofix
+
+      - name: "Telegram: репозиторій чистий"
+        if: steps.autofix.outputs.has_changes != 'true'
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "✅ Деплой-агент: змін не потрібно, репозиторій чистий"
+
+      - name: Тести
+        id: test
+        if: steps.autofix.outputs.has_changes == 'true'
+        run: python agents/deploy_agent.py test
+
+      - name: "Telegram: тести пройшли"
+        if: steps.autofix.outputs.has_changes == 'true' && steps.test.outputs.passed == 'true'
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🧪 Деплой-агент: тести пройшли, відкриваю PR"
+
+      - name: Відкинути зміни (тести не пройшли)
+        if: steps.autofix.outputs.has_changes == 'true' && steps.test.outputs.passed != 'true'
+        run: git checkout -- .
+
+      - name: "Telegram: тести не пройшли"
+        if: steps.autofix.outputs.has_changes == 'true' && steps.test.outputs.passed != 'true'
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "❌ Деплой-агент: тести не пройшли після автофіксу, зміни відкинуто (PR не відкривався)"
+
+      - name: Відкрити PR
+        id: pr
+        if: steps.autofix.outputs.has_changes == 'true' && steps.test.outputs.passed == 'true'
+        run: python agents/deploy_agent.py open-pr
+
+      - name: "Telegram: PR відкрито"
+        if: steps.pr.outputs.pr_number
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "📬 Деплой-агент відкрив PR #${PR_NUMBER}: ${PR_URL}"
+
+      - name: Автомердж тривіального PR
+        id: merge
+        if: steps.pr.outputs.trivial == 'true'
+        run: python agents/deploy_agent.py merge-pr "${{ steps.pr.outputs.pr_number }}"
+
+      - name: "Telegram: автомердж виконано"
+        if: steps.merge.outputs.merged == 'true'
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REASON: ${{ steps.pr.outputs.reason }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🚀 Деплой-агент: автомердж PR #${PR_NUMBER} виконано (${REASON})"
+
+      # Кнопки "Затвердити"/"Відхилити" — коли PR не тривіальний АБО
+      # автомердж тривіального PR з якоїсь причини не вдався (напр.
+      # branch protection вимагає review). Натискання обробляє bot.py.
+      - name: "Telegram: потрібне підтвердження"
+        if: steps.pr.outputs.pr_number != '' && (steps.pr.outputs.trivial != 'true' || steps.merge.outputs.merged == 'false')
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          REASON: ${{ steps.pr.outputs.reason }}
+        run: |
+          TEXT="🔍 Деплой-агент: PR #${PR_NUMBER} потребує підтвердження
+          ${PR_URL}
+
+          Причина: ${REASON}"
+          bash .github/scripts/telegram_notify.sh approve "$TEXT" "${PR_NUMBER}"
+
+      - name: "Telegram: аварійне завершення"
+        if: failure()
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔥 Деплой-агент завершився з помилкою. Деталі: ${RUN_URL}"

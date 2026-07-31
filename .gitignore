@@ -4,7 +4,9 @@ __pycache__/
 tasks.json
 errors.log
 heartbeat.txt
+watchdog_heartbeat.txt
 bot.pid
+bot.out.log
 *.pptx
 .venv/
 venv/
