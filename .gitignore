@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+tasks.json
+errors.log
+heartbeat.txt
+bot.pid
+*.pptx
+.venv/
+venv/
