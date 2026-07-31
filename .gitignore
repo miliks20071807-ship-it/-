@@ -8,3 +8,5 @@ bot.pid
 *.pptx
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
