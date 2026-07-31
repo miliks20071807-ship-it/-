@@ -7,9 +7,8 @@
 """
 
 import json
-from pathlib import Path
 from datetime import datetime, timezone
-from itertools import count
+from pathlib import Path
 from threading import Lock
 
 DATA_FILE = Path(__file__).parent / "tasks.json"

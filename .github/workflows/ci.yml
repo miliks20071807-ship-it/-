@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt pytest ruff
+
+      - run: ruff check .
+
+      - run: pytest -q
+
+      # Джерело помилок для багфікс-агента (крок 3): якщо тести впали
+      # на main, відкриваємо issue з лейблом "bug" — це тригерить
+      # .github/workflows/bugfix-agent.yml. Дедуп: не плодимо issue,
+      # якщо відкрита така сама вже є.
+      - name: Open bug issue on failure (main only)
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          existing=$(gh issue list --label bug --state open --search "CI failure on main" --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh issue create \
+              --title "CI failure on main ($(date -u +%Y-%m-%dT%H:%MZ))" \
+              --label bug \
+              --body "Тести/лінт впали на main у ${{ github.sha }}. Деталі: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            echo "Issue #$existing вже відкрита, не дублюю."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
