@@ -30,6 +30,14 @@ jobs:
       # на main, відкриваємо issue з лейблом "bug" — це тригерить
       # .github/workflows/bugfix-agent.yml. Дедуп: не плодимо issue,
       # якщо відкрита така сама вже є.
+      #
+      # ВАЖЛИВО: створюємо issue через GH_PAT (персональний токен), а
+      # не через стандартний secrets.GITHUB_TOKEN — GitHub навмисно не
+      # дозволяє подіям, створеним автоматичним GITHUB_TOKEN, тригерити
+      # інші workflow (захист від рекурсії). Тому issue, відкрита через
+      # GITHUB_TOKEN, НЕ запустила б bugfix-agent.yml. Якщо GH_PAT не
+      # заданий — issue все одно відкриється (через GITHUB_TOKEN), просто
+      # без автотригера багфікс-агента.
       - name: Open bug issue on failure (main only)
         id: bug_issue
         if: failure() && github.ref == 'refs/heads/main'
@@ -45,7 +53,7 @@ jobs:
             echo "Issue #$existing вже відкрита, не дублюю."
           fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: "Telegram: CI впав, відкрито issue"
         if: steps.bug_issue.outputs.opened_url
