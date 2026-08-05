@@ -35,6 +35,7 @@ from agents.common import (
     list_open_agent_prs,
     merge_pr,
     notify_telegram,
+    trigger_workflow_dispatch,
 )
 from design import generate_mockup
 from orchestrator import classify
@@ -196,34 +197,72 @@ async def cmd_start(message: Message):
     )
 
 
-AGENT_TAGS = ("@дизайн",)
+AGENT_TAGS = ("@дизайн", "@багфікс", "@деплой")
 
 
-async def maybe_dispatch_tagged_task(text: str, message: Message) -> str:
-    """Якщо текст задачі починається з тега агента (зараз лише
-    @дизайн) — одразу запускає відповідного агента з рештою тексту як
-    описом, і повертає текст БЕЗ тега (саме він піде в tasks.json).
-    Інакше повертає text без змін. Відповідь шле від імені бота
-    відповідного агента (designer_bot), а не диспетчера — щоб
-    результат виглядав "від дизайнера", навіть якщо задачу додали
-    через /задача в чаті з диспетчером."""
+async def maybe_dispatch_tagged_task(text: str, message: Message) -> tuple[str, str | None]:
+    """Якщо текст задачі починається з тега агента (@дизайн/@багфікс/
+    @деплой) — одразу запускає відповідного агента з рештою тексту як
+    описом. Повертає (текст_без_тега, ім'я_агента_або_None) —
+    ім'я_агента піде в storage.add_task(agent=...), щоб /статус_агентів
+    і /стендап могли показати крос-агентне зведення. Відповідь шле від
+    імені бота відповідного агента, а не диспетчера — щоб результат
+    виглядав "від нього", навіть якщо задачу додали в чаті з диспетчером."""
     lowered = text.lower()
-    if not lowered.startswith("@дизайн"):
-        return text
+    for tag in AGENT_TAGS:
+        if not lowered.startswith(tag):
+            continue
 
-    rest = text[len("@дизайн"):].strip()
-    if not rest:
-        return text
+        rest = text[len(tag):].strip()
+        if not rest:
+            return text, None
 
-    await message.answer("Побачив тег @дизайн — одразу малюю мокап...")
-    path = generate_mockup(rest)
-    target = designer_bot or message.bot
-    await target.send_document(
-        chat_id=message.chat.id,
-        document=FSInputFile(path),
-        caption="Мокап готовий 🎨 (за задачею з тегом @дизайн)",
-    )
-    return rest
+        if tag == "@дизайн":
+            await message.answer("Побачив тег @дизайн — одразу малюю мокап...")
+            path = generate_mockup(rest)
+            target = designer_bot or message.bot
+            await target.send_document(
+                chat_id=message.chat.id,
+                document=FSInputFile(path),
+                caption="Мокап готовий 🎨 (за задачею з тегом @дизайн)",
+            )
+            return rest, "design"
+
+        if tag == "@багфікс":
+            issue_url = create_github_issue(
+                title=f"[з задачі] {rest[:80]}",
+                body=f"Створено автоматично з тегованої задачі команди.\n\n{rest}",
+                labels=["bug"],
+            )
+            target = bugfix_bot or message.bot
+            if issue_url:
+                await target.send_message(
+                    chat_id=message.chat.id,
+                    text=f"🐞 Побачив тег @багфікс — відкрив issue: {issue_url}\nБагфікс-агент підхопить автоматично.",
+                )
+            else:
+                await target.send_message(
+                    chat_id=message.chat.id,
+                    text="⚠️ Побачив тег @багфікс, але не вдалось відкрити issue (перевір GITHUB_TOKEN/GITHUB_REPOSITORY на боті).",
+                )
+            return rest, "bugfix"
+
+        if tag == "@деплой":
+            ok, detail = trigger_workflow_dispatch(DEPLOY_WORKFLOW_FILE)
+            target = deploy_bot or message.bot
+            if ok:
+                await target.send_message(
+                    chat_id=message.chat.id,
+                    text="🚀 Побачив тег @деплой — запустив позачергову перевірку репозиторію (не чекаючи щогодинного розкладу).",
+                )
+            else:
+                await target.send_message(
+                    chat_id=message.chat.id,
+                    text=f"⚠️ Побачив тег @деплой, але не вдалось запустити: {detail}",
+                )
+            return rest, "deploy"
+
+    return text, None
 
 
 @dp.message(Command("задача"))
@@ -235,11 +274,12 @@ async def cmd_add_task(message: Message):
     if not text:
         return await message.answer(
             "Напиши текст задачі після команди, наприклад:\n/задача полагодити авторизацію\n\n"
-            "Тег @дизайн на початку одразу запускає дизайн-агента: /задача @дизайн екран профілю"
+            "Теги на початку одразу викликають агента:\n"
+            "@дизайн — HTML-мокап, @багфікс — GitHub issue, @деплой — позачергова перевірка репо"
         )
 
-    text = await maybe_dispatch_tagged_task(text, message)
-    task_id = storage.add_task(text, author=message.from_user.full_name)
+    text, agent = await maybe_dispatch_tagged_task(text, message)
+    task_id = storage.add_task(text, author=message.from_user.full_name, agent=agent)
     await message.answer(f"Задача #{task_id} додана: {text}")
 
 
@@ -369,6 +409,13 @@ async def cmd_agents_status(message: Message):
     else:
         lines.append(f"🐕 Watchdog: НЕ запускався {int(watchdog_age)}с — перевір системний cron")
 
+    # Крос-агентне зведення: відкриті задачі, додані через теги
+    # (@дизайн/@багфікс/@деплой) — видно, яка задача пішла якому агенту.
+    tagged = [t for t in storage.list_tasks(status="open") if t.get("agent")]
+    if tagged:
+        tagged_lines = "\n".join(f"  • #{t['id']} [{t['agent']}] {t['text']}" for t in tagged)
+        lines.append(f"🔗 Тегованих задач для агентів (відкриті): {len(tagged)}\n{tagged_lines}")
+
     await message.answer("\n".join(lines))
 
 
@@ -379,12 +426,13 @@ async def handle_free_text(message: Message):
     if not is_allowed(message):
         return
 
-    # Тег @дизайн перевіряємо на сирому тексті, ДО класифікації —
+    # Теги агентів перевіряємо на сирому тексті, ДО класифікації —
     # orchestrator.classify() переформульовує task_text "своїми
     # словами", тому тег міг би загубитись при перефразуванні.
-    if message.text.strip().lower().startswith("@дизайн"):
-        text = await maybe_dispatch_tagged_task(message.text.strip(), message)
-        task_id = storage.add_task(text, author=message.from_user.full_name)
+    stripped = message.text.strip()
+    if stripped.lower().startswith(AGENT_TAGS):
+        text, agent = await maybe_dispatch_tagged_task(stripped, message)
+        task_id = storage.add_task(text, author=message.from_user.full_name, agent=agent)
         return await message.answer(f"Додав як задачу #{task_id}: {text}")
 
     result = classify(message.text)

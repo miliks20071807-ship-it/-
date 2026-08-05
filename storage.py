@@ -6,6 +6,8 @@
 на SQLite чи Notion API, не міняючи bot.py.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,19 +29,25 @@ def _save(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def add_task(text: str, author: str) -> int:
-    """Додає нову задачу, повертає її id."""
+def add_task(text: str, author: str, agent: str | None = None) -> int:
+    """Додає нову задачу, повертає її id. agent — якщо задачу додано
+    через тег (@дизайн/@багфікс/@деплой), яка агента вона стосується;
+    дозволяє показувати крос-агентне зведення (/статус_агентів,
+    /стендап), не заводячи окреме сховище."""
     with _lock:
         data = _load()
         task_id = data["next_id"]
         data["next_id"] += 1
-        data["tasks"].append({
+        task = {
             "id": task_id,
             "text": text,
             "author": author,
             "status": "open",
             "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if agent:
+            task["agent"] = agent
+        data["tasks"].append(task)
         _save(data)
         return task_id
 

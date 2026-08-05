@@ -178,6 +178,19 @@ def get_last_workflow_run(workflow_file: str) -> dict | None:
     return None
 
 
+def trigger_workflow_dispatch(workflow_file: str, ref: str = "main") -> tuple[bool, str]:
+    """Запускає GitHub Actions workflow позачергово (workflow_dispatch),
+    не чекаючи cron — використовується тегом @деплой у /задача, щоб
+    людина могла попросити деплой-агента перевірити репозиторій прямо
+    зараз, а не аж у наступну годину."""
+    status, data = _github_request("POST", f"/actions/workflows/{workflow_file}/dispatches", {"ref": ref})
+    if status == 0:
+        return False, "GITHUB_TOKEN/GITHUB_REPOSITORY не налаштовані на боті"
+    if status == 204:
+        return True, "запущено"
+    return False, (data or {}).get("message", f"HTTP {status}")
+
+
 def list_open_agent_prs() -> list[dict]:
     """Відкриті PR, створені деплой- чи багфікс-агентом (за префіксом
     гілки) — саме ці чекають на ручне підтвердження в Telegram."""

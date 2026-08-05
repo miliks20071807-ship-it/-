@@ -6,6 +6,10 @@
 
 Спрацьовує або по розкладу (фоновий таск у bot.py, час/дні —
 STANDUP_TIME/STANDUP_DAYS в .env), або вручну командою /стендап.
+
+Крос-агентне зведення: разом із задачами показує ще й відкриті PR від
+деплой/багфікс-агентів (GitHub API) — щоб команда бачила все, що
+потребує уваги, в одному повідомленні, а не бігала по різних ботах.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import storage
+from agents.common import list_open_agent_prs
 
 
 def build_standup_message(hours: int = 24) -> str:
@@ -35,6 +40,18 @@ def build_standup_message(hours: int = 24) -> str:
 
     lines.append("")
     lines.append(f"📋 Відкритих задач: {len(open_tasks)}")
+
+    tagged = [t for t in open_tasks if t.get("agent")]
+    if tagged:
+        lines.append(f"🔗 З них для агентів: {len(tagged)}")
+
+    open_prs = list_open_agent_prs()
+    lines.append("")
+    if open_prs:
+        pr_lines = "\n".join(f"  • #{pr['number']} {pr['title']}" for pr in open_prs)
+        lines.append(f"🔍 PR, що чекають підтвердження: {len(open_prs)}\n{pr_lines}")
+    else:
+        lines.append("🔍 Відкритих PR немає.")
 
     lines.append("")
     lines.append(
