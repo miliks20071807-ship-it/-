@@ -39,6 +39,7 @@ from agents.common import (
 from design import generate_mockup
 from orchestrator import classify
 from presentation import build_report
+from standup import build_standup_message
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("team-bot")
@@ -56,9 +57,20 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 BUGFIX_BOT_TOKEN = os.environ.get("TELEGRAM_BUGFIX_BOT_TOKEN", "")
 DEPLOY_BOT_TOKEN = os.environ.get("TELEGRAM_DEPLOY_BOT_TOKEN", "")
 DESIGNER_BOT_TOKEN = os.environ.get("TELEGRAM_DESIGNER_BOT_TOKEN", "")
+STANDUP_BOT_TOKEN = os.environ.get("TELEGRAM_STANDUP_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(uid) for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
 }
+TELEGRAM_ALERT_CHAT_ID = os.environ.get("TELEGRAM_ALERT_CHAT_ID", "")
+
+# Час і дні щоденного авто-стендапу (локальний час хоста бота — без
+# нової залежності типу zoneinfo/pytz, для команди в одному часовому
+# поясі цього достатньо). Формат STANDUP_TIME — "HH:MM" (24-год).
+STANDUP_TIME = os.environ.get("STANDUP_TIME", "09:30")
+STANDUP_DAYS = {
+    d.strip().lower() for d in os.environ.get("STANDUP_DAYS", "mon,tue,wed,thu,fri").split(",") if d.strip()
+}
+_WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -82,6 +94,12 @@ deploy_dp = Dispatcher() if DEPLOY_BOT_TOKEN else None
 # основний бот (див. реєстрацію хендлера нижче).
 designer_bot = Bot(token=DESIGNER_BOT_TOKEN) if DESIGNER_BOT_TOKEN else None
 designer_dp = Dispatcher() if DESIGNER_BOT_TOKEN else None
+
+# Стендап-агент — теж не крон-агент у GitHub Actions, а фоновий таск
+# всередині bot.py (standup_loop нижче), бо зведення читає tasks.json,
+# який живе лише на хості бота, а не в git-репозиторії.
+standup_bot = Bot(token=STANDUP_BOT_TOKEN) if STANDUP_BOT_TOKEN else None
+standup_dp = Dispatcher() if STANDUP_BOT_TOKEN else None
 
 
 @dp.error()
@@ -172,6 +190,7 @@ async def cmd_start(message: Message):
         "/done <id> — позначити задачу виконаною\n"
         "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
         "/дизайн <опис> — HTML-мокап екрана продукту\n"
+        "/стендап — зведення по задачах + запрошення на стендап (і щодня автоматично)\n"
         "/статус_агентів — стан деплой-агента, відкритих PR і watchdog\n\n"
         "Або просто напиши повідомлення — я сам розберусь, задача це чи ні."
     )
@@ -230,6 +249,17 @@ async def cmd_design(message: Message):
 
 
 (designer_dp or dp).message(Command("дизайн"))(cmd_design)
+
+
+async def cmd_standup(message: Message):
+    """Стендап-агент: /стендап — миттєве зведення (те саме, що й
+    щоденний авто-стендап за розкладом, лише вручну й одразу)."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+    await message.answer(build_standup_message())
+
+
+(standup_dp or dp).message(Command("стендап"))(cmd_standup)
 
 
 @dp.message(Command("презентація"))
@@ -291,6 +321,11 @@ async def cmd_agents_status(message: Message):
     lines.append("🐛 Багфікс-бот: увімкнено" if bugfix_bot is not None else "🐛 Багфікс-бот: вимкнено (TELEGRAM_BUGFIX_BOT_TOKEN не задано)")
     lines.append("🤖 Деплой-бот: увімкнено" if deploy_bot is not None else "🤖 Деплой-бот: вимкнено (TELEGRAM_DEPLOY_BOT_TOKEN не задано)")
     lines.append("🎨 Дизайн-бот: увімкнено" if designer_bot is not None else "🎨 Дизайн-бот: /дизайн обробляє основний бот (TELEGRAM_DESIGNER_BOT_TOKEN не задано)")
+    lines.append(
+        f"📅 Стендап-бот: увімкнено, {STANDUP_TIME} у {','.join(sorted(STANDUP_DAYS))}"
+        if standup_bot is not None
+        else "📅 Стендап-бот: /стендап обробляє основний бот (TELEGRAM_STANDUP_BOT_TOKEN не задано)"
+    )
 
     watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
     if watchdog_age is None:
@@ -332,11 +367,38 @@ async def heartbeat_loop():
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
+async def standup_loop():
+    """Раз на хвилину перевіряє, чи не настав час щоденного стендапу
+    (STANDUP_TIME/STANDUP_DAYS, локальний час хоста) — і якщо так,
+    шле зведення в TELEGRAM_ALERT_CHAT_ID через standup_bot (чи
+    основного бота, якщо STANDUP_BOT_TOKEN не задано). last_sent
+    захищає від повторної відправки в ту саму хвилину/дату."""
+    last_sent_date = None
+    target_bot = standup_bot or bot
+
+    while True:
+        now = datetime.now()  # noqa: DTZ005 — навмисно локальний час хоста, не UTC
+        today_key = _WEEKDAY_KEYS[now.weekday()]
+
+        if (
+            today_key in STANDUP_DAYS
+            and now.strftime("%H:%M") == STANDUP_TIME
+            and last_sent_date != now.date()
+        ):
+            if TELEGRAM_ALERT_CHAT_ID:
+                await target_bot.send_message(chat_id=TELEGRAM_ALERT_CHAT_ID, text=build_standup_message())
+                last_sent_date = now.date()
+            else:
+                log.warning("Час стендапу настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+
+        await asyncio.sleep(30)
+
+
 async def main():
     log.info("Бот запущено, чекаю повідомлень...")
     PID_FILE.write_text(str(os.getpid()))
 
-    tasks = [heartbeat_loop(), dp.start_polling(bot)]
+    tasks = [heartbeat_loop(), standup_loop(), dp.start_polling(bot)]
     if bugfix_bot is not None:
         log.info("Багфікс-бот теж запущено (TELEGRAM_BUGFIX_BOT_TOKEN заданий).")
         tasks.append(bugfix_dp.start_polling(bugfix_bot))
@@ -354,6 +416,12 @@ async def main():
         tasks.append(designer_dp.start_polling(designer_bot))
     else:
         log.info("TELEGRAM_DESIGNER_BOT_TOKEN не задано — /дизайн обробляє основний бот.")
+
+    if standup_bot is not None:
+        log.info("Стендап-бот теж запущено (TELEGRAM_STANDUP_BOT_TOKEN заданий).")
+        tasks.append(standup_dp.start_polling(standup_bot))
+    else:
+        log.info("TELEGRAM_STANDUP_BOT_TOKEN не задано — /стендап обробляє основний бот.")
 
     await asyncio.gather(*tasks)
 
