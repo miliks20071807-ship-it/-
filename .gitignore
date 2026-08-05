@@ -14,3 +14,4 @@ venv/
 .ruff_cache/
 watchdog_cron.log
 design.html
+ideas.json

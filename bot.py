@@ -16,10 +16,18 @@ import os
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, Message
+from aiogram.types import (
+    CallbackQuery,
+    ErrorEvent,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
 
 # Мусить виконатись до імпорту наших модулів (orchestrator.py читає
@@ -38,6 +46,8 @@ from agents.common import (
     trigger_workflow_dispatch,
 )
 from design import generate_mockup
+from ideas_agent import generate_content_ideas, generate_product_ideas
+from ideas_storage import add_idea, list_ideas, save_idea
 from orchestrator import classify
 from presentation import build_report
 from standup import build_standup_message
@@ -59,6 +69,7 @@ BUGFIX_BOT_TOKEN = os.environ.get("TELEGRAM_BUGFIX_BOT_TOKEN", "")
 DEPLOY_BOT_TOKEN = os.environ.get("TELEGRAM_DEPLOY_BOT_TOKEN", "")
 DESIGNER_BOT_TOKEN = os.environ.get("TELEGRAM_DESIGNER_BOT_TOKEN", "")
 STANDUP_BOT_TOKEN = os.environ.get("TELEGRAM_STANDUP_BOT_TOKEN", "")
+IDEAS_BOT_TOKEN = os.environ.get("TELEGRAM_IDEAS_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(uid) for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
 }
@@ -72,6 +83,14 @@ STANDUP_DAYS = {
     d.strip().lower() for d in os.environ.get("STANDUP_DAYS", "mon,tue,wed,thu,fri").split(",") if d.strip()
 }
 _WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# День/час щотижневої розсилки ідей — тут, на відміну від стендапу,
+# використовуємо zoneinfo (стандартна бібліотека з Python 3.9, без
+# нової залежності): користувач явно попросив Europe/Kyiv, а не просто
+# "локальний час хоста".
+IDEAS_DAY = os.environ.get("IDEAS_DAY", "mon").strip().lower()
+IDEAS_TIME = os.environ.get("IDEAS_TIME", "10:00")
+IDEAS_TIMEZONE = ZoneInfo(os.environ.get("IDEAS_TIMEZONE", "Europe/Kyiv"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -101,6 +120,11 @@ designer_dp = Dispatcher() if DESIGNER_BOT_TOKEN else None
 # який живе лише на хості бота, а не в git-репозиторії.
 standup_bot = Bot(token=STANDUP_BOT_TOKEN) if STANDUP_BOT_TOKEN else None
 standup_dp = Dispatcher() if STANDUP_BOT_TOKEN else None
+
+# Ідея-агент — команди за запитом (/ідея_продукт, /ідея_контент,
+# /ідеї_збережені) + щотижневий фоновий таск (ideas_loop нижче).
+ideas_bot = Bot(token=IDEAS_BOT_TOKEN) if IDEAS_BOT_TOKEN else None
+ideas_dp = Dispatcher() if IDEAS_BOT_TOKEN else None
 
 
 @dp.error()
@@ -182,6 +206,48 @@ if deploy_dp is not None:
         await process_pr_callback(callback)
 
 
+async def process_idea_callback(callback: CallbackQuery) -> None:
+    """Кнопка "💾 Зберегти" під згенерованою ідеєю. Ідея вже лежить у
+    ideas.json зі статусом "new" (записана одразу при генерації) —
+    тут лише переводимо в "saved"."""
+    if not is_allowed_user(callback.from_user.id):
+        return await callback.answer("Немає доступу.", show_alert=True)
+
+    _, idea_id = callback.data.split(":", 1)
+    ok = save_idea(int(idea_id))
+
+    original_text = callback.message.text or ""
+    outcome = "💾 Збережено" if ok else "⚠️ Не вдалось зберегти (ідею не знайдено)"
+    await callback.message.edit_text(f"{original_text}\n\n— {outcome}")
+    await callback.answer(outcome)
+
+
+@dp.callback_query(F.data.startswith("idea:"))
+async def handle_idea_callback(callback: CallbackQuery):
+    await process_idea_callback(callback)
+
+
+if ideas_dp is not None:
+    @ideas_dp.callback_query(F.data.startswith("idea:"))
+    async def handle_ideas_bot_callback(callback: CallbackQuery):
+        await process_idea_callback(callback)
+
+
+async def send_idea_with_button(chat_id: int | str, idea_type: str, text: str, target_bot: Bot) -> None:
+    """Зберігає ідею (статус "new") і шле окремим повідомленням з
+    кнопкою "💾 Зберегти" (callback_data "idea:<id>")."""
+    idea_id = add_idea(idea_type, text)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💾 Зберегти", callback_data=f"idea:{idea_id}")]
+    ])
+    label = "💡 Продуктова ідея" if idea_type == "product" else "🎬 Контентна ідея"
+    await target_bot.send_message(
+        chat_id=chat_id,
+        text=f"{label}\n\n{text}",
+        reply_markup=keyboard,
+    )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -192,6 +258,9 @@ async def cmd_start(message: Message):
         "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
         "/дизайн <опис> — HTML-мокап екрана продукту\n"
         "/стендап — зведення по задачах + запрошення на стендап (і щодня автоматично)\n"
+        "/ідея_продукт — 5 продуктових ідей\n"
+        "/ідея_контент — 5 ідей для Reels/TikTok\n"
+        "/ідеї_збережені — список збережених ідей (і щотижня автоматично 3+3)\n"
         "/статус_агентів — стан деплой-агента, відкритих PR і watchdog\n\n"
         "Або просто напиши повідомлення — я сам розберусь, задача це чи ні."
     )
@@ -336,6 +405,53 @@ async def cmd_standup(message: Message):
 (standup_dp or dp).message(Command("стендап"))(cmd_standup)
 
 
+async def cmd_idea_product(message: Message):
+    """Ідея-агент: /ідея_продукт — 5 продуктових ідей (нові фічі,
+    UX-покращення, механіки утримання), кожна окремим повідомленням з
+    кнопкою "Зберегти"."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    await message.answer("Генерую продуктові ідеї...")
+    target = ideas_bot or message.bot
+    for text in generate_product_ideas(5):
+        await send_idea_with_button(message.chat.id, "product", text, target)
+
+
+(ideas_dp or dp).message(Command("ідея_продукт"))(cmd_idea_product)
+
+
+async def cmd_idea_content(message: Message):
+    """Ідея-агент: /ідея_контент — 5 ідей коротких відео (Reels/TikTok),
+    кожна окремим повідомленням з кнопкою "Зберегти"."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    await message.answer("Генерую контентні ідеї...")
+    target = ideas_bot or message.bot
+    for text in generate_content_ideas(5):
+        await send_idea_with_button(message.chat.id, "content", text, target)
+
+
+(ideas_dp or dp).message(Command("ідея_контент"))(cmd_idea_content)
+
+
+async def cmd_ideas_saved(message: Message):
+    """Ідея-агент: /ідеї_збережені — весь список ідей зі статусом saved."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    saved = list_ideas(status="saved")
+    if not saved:
+        return await message.answer("Збережених ідей поки немає.")
+
+    lines = [f"#{i['id']} [{i['type']}] {i['text']}" for i in saved]
+    await message.answer("Збережені ідеї:\n" + "\n\n".join(lines))
+
+
+(ideas_dp or dp).message(Command("ідеї_збережені"))(cmd_ideas_saved)
+
+
 @dp.message(Command("презентація"))
 async def cmd_presentation(message: Message):
     """Крок 4: генерує pptx-звіт по задачах команди за період.
@@ -399,6 +515,11 @@ async def cmd_agents_status(message: Message):
         f"📅 Стендап-бот: увімкнено, {STANDUP_TIME} у {','.join(sorted(STANDUP_DAYS))}"
         if standup_bot is not None
         else "📅 Стендап-бот: /стендап обробляє основний бот (TELEGRAM_STANDUP_BOT_TOKEN не задано)"
+    )
+    lines.append(
+        f"💡 Ідея-бот: увімкнено, {IDEAS_DAY} {IDEAS_TIME} ({IDEAS_TIMEZONE.key})"
+        if ideas_bot is not None
+        else "💡 Ідея-бот: команди обробляє основний бот (TELEGRAM_IDEAS_BOT_TOKEN не задано)"
     )
 
     watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
@@ -484,11 +605,43 @@ async def standup_loop():
         await asyncio.sleep(30)
 
 
+async def ideas_loop():
+    """Раз на хвилину перевіряє, чи не настав час щотижневої розсилки
+    ідей (IDEAS_DAY/IDEAS_TIME, IDEAS_TIMEZONE — за замовчуванням
+    Europe/Kyiv) — і якщо так, шле 3 продуктові + 3 контентні ідеї в
+    TELEGRAM_ALERT_CHAT_ID без запиту, кожну окремим повідомленням з
+    кнопкою "Зберегти". last_sent захищає від повторної відправки в
+    той самий тиждень."""
+    last_sent_week = None
+    target = ideas_bot or bot
+
+    while True:
+        now = datetime.now(IDEAS_TIMEZONE)
+        today_key = _WEEKDAY_KEYS[now.weekday()]
+        this_week = now.isocalendar()[:2]  # (рік, номер тижня)
+
+        if today_key == IDEAS_DAY and now.strftime("%H:%M") == IDEAS_TIME and last_sent_week != this_week:
+            if TELEGRAM_ALERT_CHAT_ID:
+                await target.send_message(
+                    chat_id=TELEGRAM_ALERT_CHAT_ID,
+                    text="💡 Щотижнева пачка ідей від ідея-агента:",
+                )
+                for text in generate_product_ideas(3):
+                    await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "product", text, target)
+                for text in generate_content_ideas(3):
+                    await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "content", text, target)
+                last_sent_week = this_week
+            else:
+                log.warning("Час розсилки ідей настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+
+        await asyncio.sleep(30)
+
+
 async def main():
     log.info("Бот запущено, чекаю повідомлень...")
     PID_FILE.write_text(str(os.getpid()))
 
-    tasks = [heartbeat_loop(), standup_loop(), dp.start_polling(bot)]
+    tasks = [heartbeat_loop(), standup_loop(), ideas_loop(), dp.start_polling(bot)]
     if bugfix_bot is not None:
         log.info("Багфікс-бот теж запущено (TELEGRAM_BUGFIX_BOT_TOKEN заданий).")
         tasks.append(bugfix_dp.start_polling(bugfix_bot))
@@ -512,6 +665,12 @@ async def main():
         tasks.append(standup_dp.start_polling(standup_bot))
     else:
         log.info("TELEGRAM_STANDUP_BOT_TOKEN не задано — /стендап обробляє основний бот.")
+
+    if ideas_bot is not None:
+        log.info("Ідея-бот теж запущено (TELEGRAM_IDEAS_BOT_TOKEN заданий).")
+        tasks.append(ideas_dp.start_polling(ideas_bot))
+    else:
+        log.info("TELEGRAM_IDEAS_BOT_TOKEN не задано — команди ідея-агента обробляє основний бот.")
 
     await asyncio.gather(*tasks)
 

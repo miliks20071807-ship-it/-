@@ -1,0 +1,83 @@
+"""
+Ідея-агент: генерує продуктові й контентні ідеї для розвитку продукту.
+
+Окремо від orchestrator.py — той розпізнає намір у вільному тексті
+(chat-класифікатор), цей — детермінований генератор за командою чи
+розкладом, без інтерпретації довільного вводу користувача.
+
+Опис продукту винесено в PRODUCT.md (не хардкод у промпті), щоб
+міняти позиціонування без правок коду.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from anthropic import Anthropic
+
+from agents.common import extract_text
+
+MODEL = "claude-sonnet-5"
+PRODUCT_DESCRIPTION_FILE = Path(__file__).parent / "PRODUCT.md"
+
+PRODUCT_SYSTEM_PROMPT = """Ти — продуктовий стратег невеликого стартапу.
+
+Продукт:
+{product}
+
+Згенеруй {n} конкретних продуктових ідей — нові фічі, покращення UX,
+механіки утримання/залучення користувачів. Кожна ідея: одна конкретна
+фіча (не абстрактний напрямок) + одне речення, чому саме вона підвищить
+утримання чи залучення.
+
+Відповідай ЛИШЕ JSON-масивом рядків, без пояснень навколо:
+["Назва фічі — чому вона працює.", "..."]
+"""
+
+CONTENT_SYSTEM_PROMPT = """Ти — контент-стратег, що просуває мобільний
+застосунок через короткі відео (Reels/TikTok, формат 15-30 секунд,
+спільний під обидві платформи).
+
+Продукт:
+{product}
+
+Згенеруй {n} конкретних ідей коротких відео. Кожна ідея — реальний
+формат короткого відео (челендж, "до/після", "3 речі, які...",
+закадровий голос під екран застосунку тощо), а НЕ абстрактне
+"розкажи про фічу". Опиши конкретний хук/концепцію одним-двома
+реченнями.
+
+Відповідай ЛИШЕ JSON-масивом рядків, без пояснень навколо:
+["Хук/концепція відео.", "..."]
+"""
+
+
+def _load_product_description() -> str:
+    return PRODUCT_DESCRIPTION_FILE.read_text(encoding="utf-8").strip()
+
+
+def _generate(system_prompt: str, n: int) -> list[str]:
+    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=2000,
+        system=system_prompt.format(product=_load_product_description(), n=n),
+        messages=[{"role": "user", "content": f"Згенеруй {n} ідей."}],
+    )
+    raw = extract_text(response).strip()
+    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        ideas = json.loads(raw)
+    except json.JSONDecodeError:
+        return [raw]
+    return [str(idea) for idea in ideas][:n]
+
+
+def generate_product_ideas(n: int = 5) -> list[str]:
+    return _generate(PRODUCT_SYSTEM_PROMPT, n)
+
+
+def generate_content_ideas(n: int = 5) -> list[str]:
+    return _generate(CONTENT_SYSTEM_PROMPT, n)
