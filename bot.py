@@ -36,6 +36,7 @@ from agents.common import (
     merge_pr,
     notify_telegram,
 )
+from design import generate_mockup
 from orchestrator import classify
 from presentation import build_report
 
@@ -54,6 +55,7 @@ DEPLOY_WORKFLOW_FILE = "deploy-agent.yml"
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 BUGFIX_BOT_TOKEN = os.environ.get("TELEGRAM_BUGFIX_BOT_TOKEN", "")
 DEPLOY_BOT_TOKEN = os.environ.get("TELEGRAM_DEPLOY_BOT_TOKEN", "")
+DESIGNER_BOT_TOKEN = os.environ.get("TELEGRAM_DESIGNER_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(uid) for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
 }
@@ -73,6 +75,13 @@ bugfix_dp = Dispatcher() if BUGFIX_BOT_TOKEN else None
 
 deploy_bot = Bot(token=DEPLOY_BOT_TOKEN) if DEPLOY_BOT_TOKEN else None
 deploy_dp = Dispatcher() if DEPLOY_BOT_TOKEN else None
+
+# Дизайн-агент — не крон-агент, а команда за запитом (/дизайн), тому
+# на відміну від деплой/багфікс тут немає notify_telegram-фолбеку:
+# якщо DESIGNER_BOT_TOKEN не задано, команду /дизайн просто обробляє
+# основний бот (див. реєстрацію хендлера нижче).
+designer_bot = Bot(token=DESIGNER_BOT_TOKEN) if DESIGNER_BOT_TOKEN else None
+designer_dp = Dispatcher() if DESIGNER_BOT_TOKEN else None
 
 
 @dp.error()
@@ -162,6 +171,7 @@ async def cmd_start(message: Message):
         "/задачі — показати відкриті задачі\n"
         "/done <id> — позначити задачу виконаною\n"
         "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
+        "/дизайн <опис> — HTML-мокап екрана продукту\n"
         "/статус_агентів — стан деплой-агента, відкритих PR і watchdog\n\n"
         "Або просто напиши повідомлення — я сам розберусь, задача це чи ні."
     )
@@ -198,6 +208,28 @@ async def cmd_done(message: Message):
 
     ok = storage.complete_task(int(arg))
     await message.answer(f"Задача #{arg} закрита ✅" if ok else f"Задачу #{arg} не знайдено")
+
+
+async def cmd_design(message: Message):
+    """Дизайн-агент: /дизайн <опис екрана/фічі> генерує HTML-мокап
+    через Claude і шле файл у чат (відкривається в браузері). Claude —
+    текстова модель, не малює картинки, тому результат — робочий
+    HTML/CSS, а не зображення."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    description = message.text.partition(" ")[2].strip()
+    if not description:
+        return await message.answer(
+            "Опиши, що намалювати, наприклад:\n/дизайн екран календаря на день з подіями та кнопкою додати подію"
+        )
+
+    await message.answer("Малюю мокап...")
+    path = generate_mockup(description)
+    await message.answer_document(FSInputFile(path), caption="Мокап готовий 🎨 Відкрий файл у браузері")
+
+
+(designer_dp or dp).message(Command("дизайн"))(cmd_design)
 
 
 @dp.message(Command("презентація"))
@@ -258,6 +290,7 @@ async def cmd_agents_status(message: Message):
 
     lines.append("🐛 Багфікс-бот: увімкнено" if bugfix_bot is not None else "🐛 Багфікс-бот: вимкнено (TELEGRAM_BUGFIX_BOT_TOKEN не задано)")
     lines.append("🤖 Деплой-бот: увімкнено" if deploy_bot is not None else "🤖 Деплой-бот: вимкнено (TELEGRAM_DEPLOY_BOT_TOKEN не задано)")
+    lines.append("🎨 Дизайн-бот: увімкнено" if designer_bot is not None else "🎨 Дизайн-бот: /дизайн обробляє основний бот (TELEGRAM_DESIGNER_BOT_TOKEN не задано)")
 
     watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
     if watchdog_age is None:
@@ -315,6 +348,12 @@ async def main():
         tasks.append(deploy_dp.start_polling(deploy_bot))
     else:
         log.info("TELEGRAM_DEPLOY_BOT_TOKEN не задано — кнопки деплой-агента обробляє основний бот.")
+
+    if designer_bot is not None:
+        log.info("Дизайн-бот теж запущено (TELEGRAM_DESIGNER_BOT_TOKEN заданий).")
+        tasks.append(designer_dp.start_polling(designer_bot))
+    else:
+        log.info("TELEGRAM_DESIGNER_BOT_TOKEN не задано — /дизайн обробляє основний бот.")
 
     await asyncio.gather(*tasks)
 

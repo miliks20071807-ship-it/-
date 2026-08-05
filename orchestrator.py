@@ -14,6 +14,8 @@ import os
 
 from anthropic import Anthropic
 
+from agents.common import extract_text
+
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # Швидка/дешева модель для класифікації наміру.
@@ -43,7 +45,7 @@ def classify(message_text: str) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message_text}],
     )
-    raw = response.content[0].text.strip()
+    raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
     try:

@@ -44,7 +44,7 @@ from pathlib import Path
 from anthropic import Anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.common import gh, run, run_tests, set_output
+from agents.common import extract_text, gh, run, run_tests, set_output
 
 MODEL = "claude-sonnet-5"
 REPO_ROOT = Path(__file__).parent.parent
@@ -87,7 +87,7 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
         system=FIX_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content[:100_000]}],
     )
-    raw = response.content[0].text.strip()
+    raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         result = json.loads(raw)

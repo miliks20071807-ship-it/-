@@ -17,6 +17,20 @@ import subprocess
 import urllib.error
 import urllib.request
 
+
+def extract_text(response) -> str:
+    """Повертає текст першого текстового блоку відповіді Claude.
+
+    Деякі моделі (напр. claude-sonnet-5) можуть повертати ThinkingBlock
+    першим елементом content — content[0].text напряму на них падає з
+    AttributeError. Шукаємо перший блок з type == "text" замість
+    жорсткого припущення про індекс."""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ValueError("У відповіді Claude немає текстового блоку")
+
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ALERT_CHAT_ID = os.environ.get("TELEGRAM_ALERT_CHAT_ID", "")
 
