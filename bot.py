@@ -22,6 +22,11 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, Message
 from dotenv import load_dotenv
 
+# Мусить виконатись до імпорту наших модулів (orchestrator.py читає
+# ANTHROPIC_API_KEY одразу при імпорті, на рівні модуля) — інакше
+# .env ще не встигає завантажитись і process падає з KeyError.
+load_dotenv()
+
 import storage
 from agents.common import (
     close_pr,
@@ -33,8 +38,6 @@ from agents.common import (
 )
 from orchestrator import classify
 from presentation import build_report
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("team-bot")
@@ -49,12 +52,23 @@ WATCHDOG_STALE_AFTER_SECONDS = 900  # запас у 3x типовий cron-ін�
 DEPLOY_WORKFLOW_FILE = "deploy-agent.yml"
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+BUGFIX_BOT_TOKEN = os.environ.get("TELEGRAM_BUGFIX_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(uid) for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
 }
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Окремий бот під пошук/фікс багів (своя ідентичність у Telegram —
+# команда бачить сповіщення про баги від "багфіксера", а не від
+# загального диспетчера). Технічно це другий Bot+Dispatcher в тому ж
+# процесі (не окремий скрипт) — так watchdog і далі стежить лише за
+# одним процесом через один heartbeat.txt/bot.pid. Якщо
+# TELEGRAM_BUGFIX_BOT_TOKEN не заданий — багфікс-сповіщення просто
+# йдуть через основного бота (graceful degradation, нічого не ламається).
+bugfix_bot = Bot(token=BUGFIX_BOT_TOKEN) if BUGFIX_BOT_TOKEN else None
+bugfix_dp = Dispatcher() if BUGFIX_BOT_TOKEN else None
 
 
 @dp.error()
@@ -78,7 +92,10 @@ async def handle_error(event: ErrorEvent):
     if issue_url:
         log.info("Відкрито issue для багфікс-агента: %s", issue_url)
     else:
-        notify_telegram(f"⚠️ Помилка в боті (issue не відкрито — GITHUB_TOKEN не налаштовано):\n{type(event.exception).__name__}: {event.exception}")
+        notify_telegram(
+            f"⚠️ Помилка в боті (issue не відкрито — GITHUB_TOKEN не налаштовано):\n{type(event.exception).__name__}: {event.exception}",
+            bot_token=BUGFIX_BOT_TOKEN or None,
+        )
 
 
 def is_allowed_user(user_id: int) -> bool:
@@ -93,12 +110,13 @@ def is_allowed(message: Message) -> bool:
     return is_allowed_user(message.from_user.id)
 
 
-@dp.callback_query(F.data.startswith("pr:"))
-async def handle_pr_callback(callback: CallbackQuery):
-    """Крок з доповнення архітектури: людина підтверджує чи відхиляє
-    PR деплой/багфікс-агента прямо кнопкою в Telegram, без заходу на
-    GitHub. merge_pr/close_pr працюють через GitHub REST API — боту
-    для цього потрібен GITHUB_TOKEN з правом на merge PR (див. env.example)."""
+async def process_pr_callback(callback: CallbackQuery) -> None:
+    """Спільна логіка кнопок "Затвердити"/"Відхилити" — зареєстрована
+    на обох ботах (основному і багфікс-боті), щоб PR від будь-якого
+    агента можна було підтвердити незалежно від того, який саме бот
+    надіслав повідомлення з кнопками. merge_pr/close_pr працюють через
+    GitHub REST API — боту для цього потрібен GITHUB_TOKEN з правом на
+    merge PR (див. env.example)."""
     if not is_allowed_user(callback.from_user.id):
         return await callback.answer("Немає доступу.", show_alert=True)
 
@@ -114,6 +132,17 @@ async def handle_pr_callback(callback: CallbackQuery):
     original_text = callback.message.text or ""
     await callback.message.edit_text(f"{original_text}\n\n— {outcome} ({callback.from_user.full_name})")
     await callback.answer(outcome)
+
+
+@dp.callback_query(F.data.startswith("pr:"))
+async def handle_pr_callback(callback: CallbackQuery):
+    await process_pr_callback(callback)
+
+
+if bugfix_dp is not None:
+    @bugfix_dp.callback_query(F.data.startswith("pr:"))
+    async def handle_bugfix_pr_callback(callback: CallbackQuery):
+        await process_pr_callback(callback)
 
 
 @dp.message(CommandStart())
@@ -218,6 +247,8 @@ async def cmd_agents_status(message: Message):
     else:
         lines.append("🔍 Відкритих PR на підтвердження: 0")
 
+    lines.append("🐛 Багфікс-бот: увімкнено" if bugfix_bot is not None else "🐛 Багфікс-бот: вимкнено (TELEGRAM_BUGFIX_BOT_TOKEN не задано)")
+
     watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
     if watchdog_age is None:
         lines.append("🐕 Watchdog: даних немає (ще не запускався на цьому хості)")
@@ -261,8 +292,15 @@ async def heartbeat_loop():
 async def main():
     log.info("Бот запущено, чекаю повідомлень...")
     PID_FILE.write_text(str(os.getpid()))
-    asyncio.create_task(heartbeat_loop())
-    await dp.start_polling(bot)
+
+    tasks = [heartbeat_loop(), dp.start_polling(bot)]
+    if bugfix_bot is not None:
+        log.info("Багфікс-бот теж запущено (TELEGRAM_BUGFIX_BOT_TOKEN заданий).")
+        tasks.append(bugfix_dp.start_polling(bugfix_bot))
+    else:
+        log.info("TELEGRAM_BUGFIX_BOT_TOKEN не задано — кнопки багфікс-агента обробляє основний бот.")
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

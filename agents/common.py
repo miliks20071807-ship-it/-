@@ -55,18 +55,22 @@ def set_output(name: str, value: str) -> None:
         f.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
 
 
-def notify_telegram(text: str, chat_id: str | None = None) -> None:
+def notify_telegram(text: str, chat_id: str | None = None, bot_token: str | None = None) -> None:
     """Шле повідомлення в Telegram напряму через Bot API HTTP-запит.
     Використовується watchdog.py (і як внутрішній fallback у bot.py) —
     основний потік прогресу деплой/багфікс-агентів тепер іде через
     curl прямо з GitHub Actions (.github/scripts/telegram_notify.sh),
-    щоб не залежати від того, чи доживе python-скрипт до кінця."""
+    щоб не залежати від того, чи доживе python-скрипт до кінця.
+
+    bot_token — щоб надіслати від імені іншого бота (напр. окремого
+    багфікс-бота), а не дефолтного TELEGRAM_BOT_TOKEN."""
     target = chat_id or TELEGRAM_ALERT_CHAT_ID
-    if not TELEGRAM_BOT_TOKEN or not target:
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    if not token or not target:
         print(f"[telegram alert skipped, no token/chat_id configured]: {text}")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({
         "chat_id": target,
         "text": text,

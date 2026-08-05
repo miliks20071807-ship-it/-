@@ -51,7 +51,7 @@ jobs:
         if: steps.bug_issue.outputs.opened_url
         continue-on-error: true
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BUGFIX_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
           ISSUE_URL: ${{ steps.bug_issue.outputs.opened_url }}
         run: |

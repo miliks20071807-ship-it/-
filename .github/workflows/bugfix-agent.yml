@@ -10,7 +10,11 @@ permissions:
   issues: write
 
 env:
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  # Сповіщення багфікс-агента йдуть від окремого "багфікс-бота" (своя
+  # ідентичність у Telegram для повідомлень про баги). Якщо секрет
+  # TELEGRAM_BUGFIX_BOT_TOKEN не заданий — падає назад на звичайного
+  # TELEGRAM_BOT_TOKEN, нічого не ламається.
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BUGFIX_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
