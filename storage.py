@@ -58,6 +58,7 @@ def complete_task(task_id: int) -> bool:
         data = _load()
         for t in data["tasks"]:
             if t["id"] == task_id:
+                t["status"] = "done"
                 t["done_at"] = datetime.now(timezone.utc).isoformat()
                 _save(data)
                 return True
