@@ -10,7 +10,10 @@ permissions:
   pull-requests: write
 
 env:
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  # Сповіщення деплой-агента йдуть від окремого "деплой-бота" (своя
+  # ідентичність у Telegram). Якщо секрет TELEGRAM_DEPLOY_BOT_TOKEN не
+  # заданий — падає назад на звичайного TELEGRAM_BOT_TOKEN.
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_DEPLOY_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

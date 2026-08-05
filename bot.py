@@ -53,6 +53,7 @@ DEPLOY_WORKFLOW_FILE = "deploy-agent.yml"
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 BUGFIX_BOT_TOKEN = os.environ.get("TELEGRAM_BUGFIX_BOT_TOKEN", "")
+DEPLOY_BOT_TOKEN = os.environ.get("TELEGRAM_DEPLOY_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(uid) for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
 }
@@ -60,15 +61,18 @@ ALLOWED_USER_IDS = {
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Окремий бот під пошук/фікс багів (своя ідентичність у Telegram —
-# команда бачить сповіщення про баги від "багфіксера", а не від
-# загального диспетчера). Технічно це другий Bot+Dispatcher в тому ж
-# процесі (не окремий скрипт) — так watchdog і далі стежить лише за
-# одним процесом через один heartbeat.txt/bot.pid. Якщо
-# TELEGRAM_BUGFIX_BOT_TOKEN не заданий — багфікс-сповіщення просто
-# йдуть через основного бота (graceful degradation, нічого не ламається).
+# Окремі боти під конкретних агентів (своя ідентичність у Telegram —
+# команда бачить сповіщення від "багфіксера" чи "деплоєра", а не всі
+# змішані під одним диспетчером). Технічно це додаткові Bot+Dispatcher
+# в тому ж процесі (не окремі скрипти) — так watchdog і далі стежить
+# лише за одним процесом через один heartbeat.txt/bot.pid. Якщо
+# відповідний TELEGRAM_*_BOT_TOKEN не заданий — сповіщення того агента
+# просто йдуть через основного бота (graceful degradation).
 bugfix_bot = Bot(token=BUGFIX_BOT_TOKEN) if BUGFIX_BOT_TOKEN else None
 bugfix_dp = Dispatcher() if BUGFIX_BOT_TOKEN else None
+
+deploy_bot = Bot(token=DEPLOY_BOT_TOKEN) if DEPLOY_BOT_TOKEN else None
+deploy_dp = Dispatcher() if DEPLOY_BOT_TOKEN else None
 
 
 @dp.error()
@@ -142,6 +146,11 @@ async def handle_pr_callback(callback: CallbackQuery):
 if bugfix_dp is not None:
     @bugfix_dp.callback_query(F.data.startswith("pr:"))
     async def handle_bugfix_pr_callback(callback: CallbackQuery):
+        await process_pr_callback(callback)
+
+if deploy_dp is not None:
+    @deploy_dp.callback_query(F.data.startswith("pr:"))
+    async def handle_deploy_pr_callback(callback: CallbackQuery):
         await process_pr_callback(callback)
 
 
@@ -248,6 +257,7 @@ async def cmd_agents_status(message: Message):
         lines.append("🔍 Відкритих PR на підтвердження: 0")
 
     lines.append("🐛 Багфікс-бот: увімкнено" if bugfix_bot is not None else "🐛 Багфікс-бот: вимкнено (TELEGRAM_BUGFIX_BOT_TOKEN не задано)")
+    lines.append("🤖 Деплой-бот: увімкнено" if deploy_bot is not None else "🤖 Деплой-бот: вимкнено (TELEGRAM_DEPLOY_BOT_TOKEN не задано)")
 
     watchdog_age = _file_age_seconds(WATCHDOG_HEARTBEAT_FILE)
     if watchdog_age is None:
@@ -299,6 +309,12 @@ async def main():
         tasks.append(bugfix_dp.start_polling(bugfix_bot))
     else:
         log.info("TELEGRAM_BUGFIX_BOT_TOKEN не задано — кнопки багфікс-агента обробляє основний бот.")
+
+    if deploy_bot is not None:
+        log.info("Деплой-бот теж запущено (TELEGRAM_DEPLOY_BOT_TOKEN заданий).")
+        tasks.append(deploy_dp.start_polling(deploy_bot))
+    else:
+        log.info("TELEGRAM_DEPLOY_BOT_TOKEN не задано — кнопки деплой-агента обробляє основний бот.")
 
     await asyncio.gather(*tasks)
 
