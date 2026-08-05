@@ -22,14 +22,21 @@ jobs:
 
       - run: pip install -r requirements.txt pytest ruff
 
-      - run: ruff check .
-
-      - run: pytest -q
+      # Один крок замість двох (ruff + pytest окремо) — так є один
+      # файл виводу, який можна одразу вкласти в issue нижче. `run:`
+      # для bash на GitHub Actions вже має -eo pipefail за замовчуванням,
+      # тож крок коректно падає, якщо впаде ruff або pytest.
+      - name: Lint and test
+        run: |
+          { ruff check . && pytest -q; } 2>&1 | tee check_output.txt
 
       # Джерело помилок для багфікс-агента (крок 3): якщо тести впали
-      # на main, відкриваємо issue з лейблом "bug" — це тригерить
-      # .github/workflows/bugfix-agent.yml. Дедуп: не плодимо issue,
-      # якщо відкрита така сама вже є.
+      # на main, відкриваємо issue з лейблом "bug" і повним логом
+      # помилки в тілі — без реального тексту traceback багфікс-агент
+      # не може безпечно запропонувати фікс (перевірено живим тестом:
+      # issue лише з посиланням на прогін він чесно відхилив як
+      # недостатньо інформації). Дедуп: не плодимо issue, якщо відкрита
+      # така сама вже є.
       #
       # ВАЖЛИВО: створюємо issue через GH_PAT (персональний токен), а
       # не через стандартний secrets.GITHUB_TOKEN — GitHub навмисно не
@@ -44,10 +51,20 @@ jobs:
         run: |
           existing=$(gh issue list --label bug --state open --search "CI failure on main" --json number --jq '.[0].number')
           if [ -z "$existing" ]; then
+            {
+              echo "Тести/лінт впали на main у ${{ github.sha }}."
+              echo ""
+              echo "Лог:"
+              echo '```'
+              tail -c 4000 check_output.txt 2>/dev/null || echo "(лог недоступний)"
+              echo '```'
+              echo ""
+              echo "Деталі: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            } > issue_body.txt
             url=$(gh issue create \
               --title "CI failure on main ($(date -u +%Y-%m-%dT%H:%MZ))" \
               --label bug \
-              --body "Тести/лінт впали на main у ${{ github.sha }}. Деталі: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+              --body-file issue_body.txt)
             echo "opened_url=$url" >> "$GITHUB_OUTPUT"
           else
             echo "Issue #$existing вже відкрита, не дублюю."
