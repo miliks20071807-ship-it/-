@@ -196,6 +196,36 @@ async def cmd_start(message: Message):
     )
 
 
+AGENT_TAGS = ("@дизайн",)
+
+
+async def maybe_dispatch_tagged_task(text: str, message: Message) -> str:
+    """Якщо текст задачі починається з тега агента (зараз лише
+    @дизайн) — одразу запускає відповідного агента з рештою тексту як
+    описом, і повертає текст БЕЗ тега (саме він піде в tasks.json).
+    Інакше повертає text без змін. Відповідь шле від імені бота
+    відповідного агента (designer_bot), а не диспетчера — щоб
+    результат виглядав "від дизайнера", навіть якщо задачу додали
+    через /задача в чаті з диспетчером."""
+    lowered = text.lower()
+    if not lowered.startswith("@дизайн"):
+        return text
+
+    rest = text[len("@дизайн"):].strip()
+    if not rest:
+        return text
+
+    await message.answer("Побачив тег @дизайн — одразу малюю мокап...")
+    path = generate_mockup(rest)
+    target = designer_bot or message.bot
+    await target.send_document(
+        chat_id=message.chat.id,
+        document=FSInputFile(path),
+        caption="Мокап готовий 🎨 (за задачею з тегом @дизайн)",
+    )
+    return rest
+
+
 @dp.message(Command("задача"))
 async def cmd_add_task(message: Message):
     if not is_allowed(message):
@@ -203,8 +233,12 @@ async def cmd_add_task(message: Message):
 
     text = message.text.partition(" ")[2].strip()
     if not text:
-        return await message.answer("Напиши текст задачі після команди, наприклад:\n/задача полагодити авторизацію")
+        return await message.answer(
+            "Напиши текст задачі після команди, наприклад:\n/задача полагодити авторизацію\n\n"
+            "Тег @дизайн на початку одразу запускає дизайн-агента: /задача @дизайн екран профілю"
+        )
 
+    text = await maybe_dispatch_tagged_task(text, message)
     task_id = storage.add_task(text, author=message.from_user.full_name)
     await message.answer(f"Задача #{task_id} додана: {text}")
 
@@ -344,6 +378,14 @@ async def handle_free_text(message: Message):
     який сам вирішує — це задача, запит статусу, чи просто чат."""
     if not is_allowed(message):
         return
+
+    # Тег @дизайн перевіряємо на сирому тексті, ДО класифікації —
+    # orchestrator.classify() переформульовує task_text "своїми
+    # словами", тому тег міг би загубитись при перефразуванні.
+    if message.text.strip().lower().startswith("@дизайн"):
+        text = await maybe_dispatch_tagged_task(message.text.strip(), message)
+        task_id = storage.add_task(text, author=message.from_user.full_name)
+        return await message.answer(f"Додав як задачу #{task_id}: {text}")
 
     result = classify(message.text)
 
