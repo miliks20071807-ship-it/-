@@ -44,8 +44,10 @@ def generate_mockup(description: str) -> Path:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=12000,
         system=SYSTEM_PROMPT,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": description}],
     )
     html = extract_text(response).strip()

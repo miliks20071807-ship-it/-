@@ -83,8 +83,13 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=4000,
+        max_tokens=12000,
         system=FIX_SYSTEM_PROMPT,
+        # xhigh — найкращий рівень для кодових/агентних задач на sonnet-5
+        # (документація Anthropic); max_tokens піднято, бо thinking-токени
+        # рахуються в той самий ліміт — інакше ризик обрізати відповідь.
+        thinking={"type": "adaptive"},
+        output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": user_content[:100_000]}],
     )
     raw = extract_text(response).strip()

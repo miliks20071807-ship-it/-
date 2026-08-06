@@ -62,8 +62,10 @@ def _generate(system_prompt: str, n: int) -> list[str]:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model=MODEL,
-        max_tokens=2000,
+        max_tokens=6000,
         system=system_prompt.format(product=_load_product_description(), n=n),
+        thinking={"type": "adaptive"},
+        output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": f"Згенеруй {n} ідей."}],
     )
     raw = extract_text(response).strip()

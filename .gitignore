@@ -7,6 +7,7 @@ heartbeat.txt
 watchdog_heartbeat.txt
 bot.pid
 bot.out.log
+bot_run.log
 *.pptx
 .venv/
 venv/
