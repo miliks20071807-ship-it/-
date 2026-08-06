@@ -49,6 +49,7 @@ from design import generate_mockup
 from ideas_agent import generate_content_ideas, generate_product_ideas
 from ideas_storage import add_idea, list_ideas, save_idea
 from orchestrator import classify
+from pitch import generate_pitch_deck
 from presentation import build_report
 from standup import build_standup_message
 
@@ -257,6 +258,7 @@ async def cmd_start(message: Message):
         "/done <id> — позначити задачу виконаною\n"
         "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
         "/дизайн <опис> — HTML-мокап екрана продукту\n"
+        "/дизайн_презентація <опис ідеї> — pptx-пітч нової ідеї\n"
         "/стендап — зведення по задачах + запрошення на стендап (і щодня автоматично)\n"
         "/ідея_продукт — 5 продуктових ідей\n"
         "/ідея_контент — 5 ідей для Reels/TikTok\n"
@@ -288,7 +290,9 @@ async def cmd_help(message: Message):
         "деплою й PR з кнопками підтвердження (тривіальні фікси мерджаться "
         "автоматично)\n\n"
         "🎨 Дизайн-бот:\n"
-        "/дизайн <опис екрана> — HTML-мокап екрана продукту файлом\n\n"
+        "/дизайн <опис екрана> — HTML-мокап екрана продукту файлом\n"
+        "/дизайн_презентація <опис ідеї> — pptx-пітч нової ідеї "
+        "(проблема/рішення/як працює/наступні кроки)\n\n"
         "📅 Стендап-бот:\n"
         "/стендап — зведення по задачах і відкритих PR "
         "(і щодня автоматично о " + STANDUP_TIME + " у " + ",".join(sorted(STANDUP_DAYS)) + ")\n\n"
@@ -429,6 +433,28 @@ async def cmd_design(message: Message):
 
 
 (designer_dp or dp).message(Command("дизайн"))(cmd_design)
+
+
+async def cmd_design_pitch(message: Message):
+    """Дизайн-агент, друга команда: /дизайн_презентація <опис ідеї>
+    генерує текстовий пітч (проблема/рішення/як працює/наступні кроки)
+    і шле pptx-файлом. Окремо від /дизайн (HTML-мокап екрана) і
+    /презентація (звіт по задачах команди, не про нову ідею)."""
+    if not is_allowed(message):
+        return await message.answer("Немає доступу.")
+
+    description = message.text.partition(" ")[2].strip()
+    if not description:
+        return await message.answer(
+            "Опиши ідею, наприклад:\n/дизайн_презентація голосові нагадування-дії перед подіями в календарі"
+        )
+
+    await message.answer("Готую пітч...")
+    path = generate_pitch_deck(description)
+    await message.answer_document(FSInputFile(path), caption="Презентація готова 📊")
+
+
+(designer_dp or dp).message(Command("дизайн_презентація"))(cmd_design_pitch)
 
 
 async def cmd_standup(message: Message):
