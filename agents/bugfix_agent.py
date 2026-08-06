@@ -81,17 +81,19 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
 
     user_content = f"Issue: {issue_title}\n\n{issue_body}\n\n---\nФайли репозиторію:\n\n{files_blob}"
 
-    response = client.messages.create(
+    # xhigh-thinking з'їдає тисячі токенів ще до самого фіксу (живий тест
+    # показав ~11000/12000 токенів пішло на thinking, JSON з новим вмістом
+    # файлу обрізався) — тому ліміт піднято, а виклик стрімінговий: SDK
+    # сам вимагає streaming для запитів, що можуть перевищити 10 хв.
+    with client.messages.stream(
         model=MODEL,
-        max_tokens=12000,
+        max_tokens=32000,
         system=FIX_SYSTEM_PROMPT,
-        # xhigh — найкращий рівень для кодових/агентних задач на sonnet-5
-        # (документація Anthropic); max_tokens піднято, бо thinking-токени
-        # рахуються в той самий ліміт — інакше ризик обрізати відповідь.
         thinking={"type": "adaptive"},
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": user_content[:100_000]}],
-    )
+    ) as stream:
+        response = stream.get_final_message()
     raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:

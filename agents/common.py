@@ -16,6 +16,17 @@ import os
 import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+PRODUCT_DESCRIPTION_FILE = Path(__file__).parent.parent / "PRODUCT.md"
+
+
+def load_product_description() -> str:
+    """Продуктовий/дизайн-бриф (PRODUCT.md) — спільне джерело контексту
+    про продукт для ідея-, дизайн- і пітч-агента, щоб їхні промпти не
+    розходились і опис можна було оновити в одному місці, без правок
+    коду."""
+    return PRODUCT_DESCRIPTION_FILE.read_text(encoding="utf-8").strip()
 
 
 def extract_text(response) -> str:

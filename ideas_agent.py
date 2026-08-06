@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 from anthropic import Anthropic
 
-from agents.common import extract_text
+from agents.common import extract_text, load_product_description
 
 MODEL = "claude-sonnet-5"
-PRODUCT_DESCRIPTION_FILE = Path(__file__).parent / "PRODUCT.md"
 
 PRODUCT_SYSTEM_PROMPT = """Ти — продуктовий стратег невеликого стартапу.
 
@@ -54,16 +52,12 @@ CONTENT_SYSTEM_PROMPT = """Ти — контент-стратег, що прос
 """
 
 
-def _load_product_description() -> str:
-    return PRODUCT_DESCRIPTION_FILE.read_text(encoding="utf-8").strip()
-
-
 def _generate(system_prompt: str, n: int) -> list[str]:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model=MODEL,
         max_tokens=6000,
-        system=system_prompt.format(product=_load_product_description(), n=n),
+        system=system_prompt.format(product=load_product_description(), n=n),
         thinking={"type": "adaptive"},
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": f"Згенеруй {n} ідей."}],

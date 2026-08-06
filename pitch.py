@@ -17,28 +17,30 @@ from pathlib import Path
 from anthropic import Anthropic
 from pptx import Presentation
 
-from agents.common import extract_text
+from agents.common import extract_text, load_product_description
 
 MODEL = "claude-sonnet-5"
 OUTPUT_PATH = Path(__file__).parent / "pitch.pptx"
 
 SYSTEM_PROMPT = """Ти — продуктовий стратег, що готує короткий пітч нової
-фічі чи ідеї для мобільного застосунку "календар + AI-асистент,
-адаптивний під професію користувача".
+фічі чи ідеї для застосунку, описаного нижче.
+
+Продукт:
+{product}
 
 Отримуєш короткий опис ідеї й повертаєш структуру пітчу — конкретну,
 без води, орієнтовану на невелику продуктову команду (2-5 людей), яка
 одразу вирішуватиме, чи братись за це.
 
 Відповідай ЛИШЕ JSON:
-{
+{{
   "title": "назва ідеї",
   "subtitle": "одне речення суті",
   "problem": "яку проблему користувача це вирішує",
   "solution": "як саме це працює в застосунку",
   "how_it_works": ["крок або механіка 1", "крок або механіка 2", "..."],
   "next_steps": ["конкретний наступний крок 1", "..."]
-}
+}}
 """
 
 
@@ -47,7 +49,7 @@ def _generate_pitch(description: str) -> dict:
     response = client.messages.create(
         model=MODEL,
         max_tokens=8000,
-        system=SYSTEM_PROMPT,
+        system=SYSTEM_PROMPT.format(product=load_product_description()),
         thinking={"type": "adaptive"},
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": description}],
