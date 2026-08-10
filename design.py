@@ -1,11 +1,16 @@
 """
 Дизайн-агент: команда /дизайн <опис> у боті-дизайнері генерує
-самодостатній HTML/CSS-мокап екрана продукту через Claude і повертає
-файл у чат — відкривається в браузері як реальний візуальний макет.
+самодостатній HTML/CSS-мокап екрана продукту й повертає файл у чат —
+відкривається в браузері як реальний візуальний макет.
 
-Claude — текстова модель, не DALL-E, малювати растрові картинки не
-вміє. Тому "дизайн" тут — робочий HTML/CSS, а не згенероване
-зображення. Без нових залежностей (лише anthropic SDK, вже є в проєкті).
+Не малює растрові картинки (жодна текстова модель не вміє) — тому
+"дизайн" тут завжди робочий HTML/CSS, незалежно від провайдера.
+
+Основний рушій — безкоштовний тариф Groq (Kimi K2, сильна для
+коду/HTML, без карти — console.groq.com/keys), щоб не платити за
+Claude на кожен мокап. Якщо GROQ_API_KEY не задано чи запит впав —
+автоматичний фолбек на Claude (дорожче, але надійно), щоб фіча не
+ламалась через тимчасову недоступність безкоштовного тарифу.
 """
 
 from __future__ import annotations
@@ -15,9 +20,10 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
-from agents.common import extract_text, load_product_description
+from agents.common import call_groq, extract_text, load_product_description
 
-MODEL = "claude-sonnet-5"
+CLAUDE_MODEL = "claude-sonnet-5"
+GROQ_MODEL = "moonshotai/kimi-k2-instruct"
 OUTPUT_PATH = Path(__file__).parent / "design.html"
 
 SYSTEM_PROMPT = """Ти — продуктовий дизайнер застосунку, описаного нижче.
@@ -49,24 +55,36 @@ HTML-файл (весь CSS інлайном у <style>, без зовнішні
 """
 
 
-def generate_mockup(description: str) -> Path:
-    """Генерує design.html за описом і повертає шлях до файлу.
-
-    xhigh-thinking з'їдає left thousands токенів з max_tokens ще до
-    самого HTML — тому ліміт піднято, а виклик стрімінговий: SDK сам
-    вимагає streaming для запитів, що можуть перевищити 10 хв
-    (ValueError без цього при високому max_tokens)."""
+def _generate_via_claude(system: str, description: str) -> str:
+    """Фолбек на Claude, коли Groq недоступний. xhigh-thinking з'їдає
+    тисячі токенів max_tokens ще до самого HTML — тому ліміт піднято, а
+    виклик стрімінговий: SDK сам вимагає streaming для запитів, що
+    можуть перевищити 10 хв (ValueError без цього при високому
+    max_tokens)."""
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     with client.messages.stream(
-        model=MODEL,
+        model=CLAUDE_MODEL,
         max_tokens=32000,
-        system=SYSTEM_PROMPT.format(product=load_product_description()),
+        system=system,
         thinking={"type": "adaptive"},
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": description}],
     ) as stream:
         response = stream.get_final_message()
-    html = extract_text(response).strip()
+    return extract_text(response)
+
+
+def generate_mockup(description: str) -> Path:
+    """Генерує design.html за описом і повертає шлях до файлу."""
+    system = SYSTEM_PROMPT.format(product=load_product_description())
+
+    try:
+        html = call_groq(system, description, model=GROQ_MODEL, max_tokens=8000)
+    except Exception as e:  # noqa: BLE001 — навмисно широко: будь-яка помилка безкоштовного API веде на фолбек, а не крашить фічу
+        print(f"[дизайн] Groq недоступний ({e}), фолбек на Claude")
+        html = _generate_via_claude(system, description)
+
+    html = html.strip()
     html = html.removeprefix("```html").removeprefix("```").removesuffix("```").strip()
 
     OUTPUT_PATH.write_text(html, encoding="utf-8")

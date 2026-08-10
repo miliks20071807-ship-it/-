@@ -6,6 +6,11 @@
 
 Без нових залежностей: той самий python-pptx, що вже в проєкті для
 presentation.py.
+
+Основний рушій — безкоштовний тариф Google Gemini (без карти —
+aistudio.google.com/app/apikey), щоб не платити за Claude на кожен
+пітч. Якщо GEMINI_API_KEY не задано чи запит впав — автоматичний
+фолбек на Claude.
 """
 
 from __future__ import annotations
@@ -17,9 +22,10 @@ from pathlib import Path
 from anthropic import Anthropic
 from pptx import Presentation
 
-from agents.common import extract_text, load_product_description
+from agents.common import call_gemini, extract_text, load_product_description
 
-MODEL = "claude-sonnet-5"
+CLAUDE_MODEL = "claude-sonnet-5"
+GEMINI_MODEL = "gemini-3.6-flash"
 OUTPUT_PATH = Path(__file__).parent / "pitch.pptx"
 
 SYSTEM_PROMPT = """Ти — продуктовий стратег, що готує короткий пітч нової
@@ -44,17 +50,29 @@ SYSTEM_PROMPT = """Ти — продуктовий стратег, що готу
 """
 
 
-def _generate_pitch(description: str) -> dict:
+def _generate_via_claude(system: str, description: str) -> str:
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
-        model=MODEL,
+        model=CLAUDE_MODEL,
         max_tokens=8000,
-        system=SYSTEM_PROMPT.format(product=load_product_description()),
+        system=system,
         thinking={"type": "adaptive"},
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": description}],
     )
-    raw = extract_text(response).strip()
+    return extract_text(response)
+
+
+def _generate_pitch(description: str) -> dict:
+    system = SYSTEM_PROMPT.format(product=load_product_description())
+
+    try:
+        raw = call_gemini(system, description, model=GEMINI_MODEL, max_tokens=4000)
+    except Exception as e:  # noqa: BLE001 — навмисно широко: будь-яка помилка безкоштовного API веде на фолбек, а не крашить фічу
+        print(f"[пітч] Gemini недоступний ({e}), фолбек на Claude")
+        raw = _generate_via_claude(system, description)
+
+    raw = raw.strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     pitch = json.loads(raw)
     pitch.setdefault("title", "Ідея")

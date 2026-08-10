@@ -42,6 +42,79 @@ def extract_text(response) -> str:
     raise ValueError("У відповіді Claude немає текстового блоку")
 
 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+
+def call_groq(system: str, user: str, model: str, max_tokens: int = 8000) -> str:
+    """Виклик безкоштовного тарифу Groq (OpenAI-сумісний API, 30 RPM /
+    14400 RPD, реєстрація без картки — console.groq.com/keys).
+
+    Кидає RuntimeError, якщо GROQ_API_KEY не задано чи запит не вдався —
+    агенти, що це викликають, самі ловлять виняток і фолбечать на
+    Claude, щоб недоступність безкоштовного тарифу не ламала фічу."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY не задано")
+
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+            # Без явного User-Agent Cloudflare перед Groq API блокує
+            # дефолтний "Python-urllib/x.x" як бота (HTTP 403, code 1010).
+            "User-Agent": "team-tg-bot/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Groq HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:300]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Groq запит не вдався: {e}") from e
+
+    return data["choices"][0]["message"]["content"]
+
+
+def call_gemini(system: str, user: str, model: str, max_tokens: int = 8000) -> str:
+    """Виклик безкоштовного тарифу Google Gemini (15 RPM / 1500 RPD для
+    Flash, реєстрація без картки — aistudio.google.com/app/apikey).
+    Власний формат запиту/відповіді (не OpenAI-сумісний, на відміну
+    від Groq). Кидає RuntimeError за тих самих умов, що й call_groq."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY не задано")
+
+    payload = json.dumps({
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"maxOutputTokens": max_tokens},
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Gemini HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:300]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Gemini запит не вдався: {e}") from e
+
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Gemini повернув неочікувану відповідь: {data}") from e
+
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ALERT_CHAT_ID = os.environ.get("TELEGRAM_ALERT_CHAT_ID", "")
 

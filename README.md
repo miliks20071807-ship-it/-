@@ -32,12 +32,13 @@ watchdog.py (окремо, cron) — пінгує bot.py, перезапуска
 - `orchestrator.py` — Claude визначає намір вільного тексту (задача / список / чат)
 - `storage.py` — задачі команди, JSON-файл `tasks.json` (поле `agent`, якщо задачу додано через тег)
 - `presentation.py` — генерація pptx-звіту для `/презентація`
-- `design.py` — генерація HTML-мокапу для `/дизайн`
+- `design.py` — генерація HTML-мокапу для `/дизайн` (Groq, фолбек — Claude)
+- `pitch.py` — генерація pptx-пітчу ідеї для `/дизайн_презентація` (Gemini, фолбек — Claude)
 - `standup.py` — щоденне зведення для `/стендап` (задачі + відкриті PR)
-- `ideas_agent.py` — генерація ідей через Claude для `/ідея_продукт`/`/ідея_контент`
+- `ideas_agent.py` — генерація ідей для `/ідея_продукт`/`/ідея_контент` (Gemini, фолбек — Claude)
 - `ideas_storage.py` — збережені ідеї, JSON-файл `ideas.json`
-- `PRODUCT.md` — опис продукту одним абзацом, читає `ideas_agent.py` (не хардкод у промпті)
-- `agents/common.py` — спільне: Telegram-алерти (python), GitHub REST helpers (merge/close PR, issue, статус/запуск workflow) — і для крон-агентів, і для bot.py
+- `PRODUCT.md` — продуктовий/дизайн-бриф (навігація, дизайн-токени, функціонал, відомі баги, стек), читають `design.py`/`ideas_agent.py`/`pitch.py` (не хардкод у промптах)
+- `agents/common.py` — спільне: Telegram-алерти, GitHub REST helpers (merge/close PR, issue, статус/запуск workflow), `call_groq`/`call_gemini` (безкоштовні API), `load_product_description()` — і для крон-агентів, і для bot.py
 - `agents/deploy_agent.py` — деплой-агент (крок 2), підкоманди autofix/test/open-pr/merge-pr
 - `agents/bugfix_agent.py` — багфікс-агент (крок 3), підкоманди propose/test/open-pr
 - `watchdog.py` — health-check процес (крок 5)
@@ -51,6 +52,8 @@ watchdog.py (окремо, cron) — пінгує bot.py, перезапуска
 pip install -r requirements.txt --break-system-packages
 cp env.example .env
 # відкрийте .env і впишіть TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, ALLOWED_USER_IDS
+# опційно: GROQ_API_KEY/GEMINI_API_KEY — див. "Крок 7" нижче, щоб дизайн-/
+# ідея-/пітч-агент йшли через безкоштовні тарифи, а не завжди через Claude
 python bot.py
 ```
 
@@ -305,6 +308,45 @@ GitHub (хіба що сама захоче подивитись деталі).
 - Авто-розсилку без очікування вівторка можна перевірити, тимчасово
   виставивши `IDEAS_DAY`/`IDEAS_TIME` в `.env` на найближчу хвилину і
   перезапустивши бота.
+
+## Крок 7 — Безкоштовні API замість Claude для дизайн-/ідея-/пітч-агента
+
+Мотивація: Claude на кожен мокап/ідею/пітч (особливо з `xhigh`-thinking)
+коштує помітно на масштабі команди. Багфікс-агент лишається **виключно
+на Claude** (`agents/bugfix_agent.py`) — там ціна помилки найвища,
+агент переписує реальний файл коду. Дизайн-, ідея- й пітч-агент —
+творчі задачі з нижчою ціною просадки якості, тож для них додано
+безкоштовні тарифи (каталог — [awesome-freellm-apis](https://github.com/open-free-llm-api/awesome-freellm-apis),
+провайдер під кожен агент обраний під конкретну сильну сторону):
+
+| Агент | Основний рушій | Модель | Фолбек |
+|---|---|---|---|
+| `design.py` (`/дизайн`) | Groq | `moonshotai/kimi-k2-instruct` (сильна для коду/HTML) | Claude |
+| `ideas_agent.py` (`/ідея_*`) | Gemini | `gemini-3.6-flash` | Claude |
+| `pitch.py` (`/дизайн_презентація`) | Gemini | `gemini-3.6-flash` | Claude |
+
+Обидва — офіційні безкоштовні тарифи без картки (не reverse-engineered
+обгортки): Groq 30 RPM/14400 RPD, Gemini Flash 15 RPM/1500 RPD.
+Виклики — сирий `urllib` (як і GitHub/Telegram у `agents/common.py`,
+`call_groq`/`call_gemini`), нових SDK-залежностей не додано.
+
+**Фолбек автоматичний і мовчазний для користувача**: якщо
+`GROQ_API_KEY`/`GEMINI_API_KEY` не задані в `.env`, чи безкоштовний
+запит впав (ліміт, мережа, недоступність) — агент одразу й прозоро йде
+через Claude (`ANTHROPIC_API_KEY`), як і раніше. Тобто без жодних змін
+в `.env` уся система продовжує повністю працювати на Claude — безкоштовні
+ключі лише додатково зменшують рахунок, коли вони налаштовані.
+
+**Як увімкнути:** заповнити в `.env` `GROQ_API_KEY`
+(console.groq.com/keys) і/або `GEMINI_API_KEY`
+(aistudio.google.com/app/apikey) — обидва видаються за email, без
+картки.
+
+**Як перевірити:** тимчасово виставити свідомо неправильний
+`GROQ_API_KEY`/`GEMINI_API_KEY` і викликати `/дизайн`/`/ідея_продукт` —
+у консольному логі бота має з'явитись `[дизайн] Groq недоступний (...),
+фолбек на Claude` (аналогічно для `[ідеї]`/`[пітч]`), а фіча все одно
+відпрацює через Claude.
 
 ## Мульти-бот система і теги агентів
 
