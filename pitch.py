@@ -22,6 +22,7 @@ from pathlib import Path
 from anthropic import Anthropic
 from pptx import Presentation
 
+import api_usage
 from agents.common import call_gemini, extract_text, load_product_description
 
 CLAUDE_MODEL = "claude-sonnet-5"
@@ -51,6 +52,11 @@ SYSTEM_PROMPT = """Ти — продуктовий стратег, що готу
 
 
 def _generate_via_claude(system: str, description: str) -> str:
+    """Фолбек на Claude, коли Gemini недоступний. Перед платним викликом
+    перевіряє денний ліміт Claude API (api_usage.guard()) — щоб
+    недоступність безкоштовного Gemini не призводила до мовчазного
+    накопичення рахунку понад ліміт."""
+    api_usage.guard()
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model=CLAUDE_MODEL,
@@ -60,6 +66,7 @@ def _generate_via_claude(system: str, description: str) -> str:
         output_config={"effort": "xhigh"},
         messages=[{"role": "user", "content": description}],
     )
+    api_usage.record_call()
     return extract_text(response)
 
 

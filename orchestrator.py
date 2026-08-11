@@ -14,6 +14,7 @@ import os
 
 from anthropic import Anthropic
 
+import api_usage
 from agents.common import extract_text
 
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -45,6 +46,7 @@ def classify(message_text: str) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message_text}],
     )
+    api_usage.record_call()
     raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 

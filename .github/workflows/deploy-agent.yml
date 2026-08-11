@@ -17,6 +17,7 @@ env:
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
 
 jobs:
   scan-and-pr:
@@ -31,6 +32,20 @@ jobs:
           python-version: "3.11"
 
       - run: pip install -r requirements.txt pytest ruff
+
+      # Раннер ефемерний (новий щоразу) — без кешу api_usage.json
+      # "денний" лічильник скидався б щогодини й ліміт був би
+      # неможливо досягти. Ключ на run_id завжди унікальний (завжди
+      # save в кінці job'а), restore-keys-префікс підхоплює найсвіжіший
+      # попередній кеш; саму логіку "новий день — обнулити" робить
+      # api_usage.py._load() за датою всередині файлу.
+      - name: Кеш лічильника Anthropic API
+        uses: actions/cache@v4
+        with:
+          path: api_usage.json
+          key: api-usage-${{ github.run_id }}
+          restore-keys: |
+            api-usage-
 
       - name: git identity
         run: |
@@ -79,6 +94,14 @@ jobs:
         id: pr
         if: steps.autofix.outputs.has_changes == 'true' && steps.test.outputs.passed == 'true'
         run: python agents/deploy_agent.py open-pr
+
+      - name: "Telegram: пропущено через денний ліміт Anthropic API"
+        if: steps.pr.outputs.skipped == 'true' && steps.pr.outputs.should_warn == 'true'
+        continue-on-error: true
+        env:
+          LIMIT: ${{ env.ANTHROPIC_DAILY_CALL_LIMIT }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "⚠️ Деплой-агент: пропустив цей прогін — денний ліміт Claude API вичерпано (${LIMIT} викликів). Автофікс лишився незакомічений, спробує знову наступного разу."
 
       - name: "Telegram: PR відкрито"
         if: steps.pr.outputs.pr_number

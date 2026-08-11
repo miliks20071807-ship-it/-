@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,7 +99,11 @@ def check_once() -> None:
         reason = f"heartbeat не оновлювався {int(age)}с (bot.py, схоже, завис)"
 
     notify_telegram(f"🚨 Watchdog: бот не відповідає ({reason}). Перезапускаю...")
-    restart_bot()
+    try:
+        restart_bot()
+    except OSError as e:
+        notify_telegram(f"🔥 Watchdog: не вдалось перезапустити бота: {e}")
+        return
     notify_telegram("✅ Watchdog: команду на перезапуск бота надіслано.")
 
 
@@ -113,7 +118,15 @@ def main() -> int:
         return 0
 
     while True:
-        check_once()
+        try:
+            check_once()
+        except Exception:  # noqa: BLE001 — навмисно широко: --loop не має падати через жодну помилку однієї перевірки
+            # У --loop-режимі це довгоживучий процес — необроблений
+            # виняток тут означає, що watchdog більше нікого не
+            # перевіряє, поки хтось не помітить і не перезапустить його
+            # вручну. Пропускаємо цю ітерацію, а не валимо весь процес.
+            print("watchdog: check_once() впав, пропускаю цю ітерацію", file=sys.stderr)
+            traceback.print_exc()
         time.sleep(args.interval)
 
 

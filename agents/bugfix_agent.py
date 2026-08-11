@@ -44,6 +44,7 @@ from pathlib import Path
 from anthropic import Anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import api_usage
 from agents.common import extract_text, gh, run, run_tests, set_output
 
 MODEL = "claude-sonnet-5"
@@ -75,6 +76,7 @@ def collect_source_files() -> dict:
 
 
 def propose_fix(issue_title: str, issue_body: str) -> dict:
+    api_usage.guard()
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     files = collect_source_files()
     files_blob = "\n\n".join(f"### {path}\n```python\n{content}\n```" for path, content in files.items())
@@ -94,6 +96,7 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
         messages=[{"role": "user", "content": user_content[:100_000]}],
     ) as stream:
         response = stream.get_final_message()
+    api_usage.record_call()
     raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
@@ -108,9 +111,16 @@ def propose_fix(issue_title: str, issue_body: str) -> dict:
 
 def cmd_propose(args: argparse.Namespace) -> int:
     issue = json.loads(gh("issue", "view", str(args.issue_number), "--json", "title,body,url").stdout)
-    fix = propose_fix(issue["title"], issue.get("body") or "")
-
     set_output("issue_url", issue["url"])
+
+    try:
+        fix = propose_fix(issue["title"], issue.get("body") or "")
+    except api_usage.AnthropicLimitExceeded:
+        set_output("skipped", "true")
+        set_output("should_warn", "true" if api_usage.should_warn_once() else "false")
+        return 0
+    set_output("skipped", "false")
+
     set_output("explanation", fix["explanation"])
 
     if not fix["file"]:

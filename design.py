@@ -20,6 +20,7 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
+import api_usage
 from agents.common import call_groq, extract_text, load_product_description
 
 CLAUDE_MODEL = "claude-sonnet-5"
@@ -60,7 +61,10 @@ def _generate_via_claude(system: str, description: str) -> str:
     тисячі токенів max_tokens ще до самого HTML — тому ліміт піднято, а
     виклик стрімінговий: SDK сам вимагає streaming для запитів, що
     можуть перевищити 10 хв (ValueError без цього при високому
-    max_tokens)."""
+    max_tokens). Перед платним викликом перевіряє денний ліміт Claude
+    API (api_usage.guard()) — щоб недоступність безкоштовного Groq не
+    призводила до мовчазного накопичення рахунку понад ліміт."""
+    api_usage.guard()
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     with client.messages.stream(
         model=CLAUDE_MODEL,
@@ -71,6 +75,7 @@ def _generate_via_claude(system: str, description: str) -> str:
         messages=[{"role": "user", "content": description}],
     ) as stream:
         response = stream.get_final_message()
+    api_usage.record_call()
     return extract_text(response)
 
 

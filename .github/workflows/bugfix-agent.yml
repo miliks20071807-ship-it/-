@@ -18,6 +18,7 @@ env:
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
   ISSUE_NUMBER: ${{ github.event.issue.number }}
 
 jobs:
@@ -35,6 +36,16 @@ jobs:
 
       - run: pip install -r requirements.txt pytest ruff
 
+      # Той самий трюк, що в deploy-agent.yml: раннер ефемерний, без
+      # кешу лічильник (api_usage.json) скидався б на кожному запуску.
+      - name: Кеш лічильника Anthropic API
+        uses: actions/cache@v4
+        with:
+          path: api_usage.json
+          key: api-usage-${{ github.run_id }}
+          restore-keys: |
+            api-usage-
+
       - name: git identity
         run: |
           git config user.name "bugfix-agent"
@@ -49,8 +60,16 @@ jobs:
         id: propose
         run: python agents/bugfix_agent.py propose "${ISSUE_NUMBER}"
 
+      - name: "Telegram: пропущено через денний ліміт Anthropic API"
+        if: steps.propose.outputs.skipped == 'true' && steps.propose.outputs.should_warn == 'true'
+        continue-on-error: true
+        env:
+          LIMIT: ${{ env.ANTHROPIC_DAILY_CALL_LIMIT }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "⚠️ Багфікс-агент: пропустив аналіз issue #${ISSUE_NUMBER} — денний ліміт Claude API вичерпано (${LIMIT} викликів). Issue лишається відкритою, спробує знову пізніше (напр. після ручного relabel)."
+
       - name: "Telegram: не зміг визначити фікс"
-        if: steps.propose.outputs.has_fix != 'true'
+        if: steps.propose.outputs.skipped != 'true' && steps.propose.outputs.has_fix != 'true'
         continue-on-error: true
         env:
           EXPLANATION: ${{ steps.propose.outputs.explanation }}
@@ -58,7 +77,7 @@ jobs:
           bash .github/scripts/telegram_notify.sh text "🤷 Багфікс-агент не зміг впевнено визначити фікс для issue #${ISSUE_NUMBER}: ${EXPLANATION}"
 
       - name: "Issue: коментар (фікс не знайдено)"
-        if: steps.propose.outputs.has_fix != 'true'
+        if: steps.propose.outputs.skipped != 'true' && steps.propose.outputs.has_fix != 'true'
         env:
           EXPLANATION: ${{ steps.propose.outputs.explanation }}
         run: |

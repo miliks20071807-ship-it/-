@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import api_usage
 from agents.common import extract_text, gh, run, run_tests, set_output
 
 MODEL = "claude-sonnet-5"
@@ -56,6 +57,7 @@ ASSESS_SYSTEM_PROMPT = """Ти оцінюєш diff у невеликому Pytho
 
 
 def assess_diff(diff_text: str) -> dict:
+    api_usage.guard()
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model=MODEL,
@@ -63,6 +65,7 @@ def assess_diff(diff_text: str) -> dict:
         system=ASSESS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": diff_text[:8000]}],
     )
+    api_usage.record_call()
     raw = extract_text(response).strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
@@ -92,7 +95,14 @@ def cmd_test(_args: argparse.Namespace) -> int:
 
 def cmd_open_pr(_args: argparse.Namespace) -> int:
     diff_text = run(["git", "diff"], check=False).stdout
-    assessment = assess_diff(diff_text)
+
+    try:
+        assessment = assess_diff(diff_text)
+    except api_usage.AnthropicLimitExceeded:
+        set_output("skipped", "true")
+        set_output("should_warn", "true" if api_usage.should_warn_once() else "false")
+        return 0
+    set_output("skipped", "false")
 
     branch = f"deploy-agent/auto-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     run(["git", "checkout", "-b", branch])

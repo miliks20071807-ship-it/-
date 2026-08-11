@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 # .env ще не встигає завантажитись і process падає з KeyError.
 load_dotenv()
 
+import api_usage
 import storage
 from agents.common import (
     close_pr,
@@ -153,6 +154,17 @@ async def handle_error(event: ErrorEvent):
             f"⚠️ Помилка в боті (issue не відкрито — GITHUB_TOKEN не налаштовано):\n{type(event.exception).__name__}: {event.exception}",
             bot_token=BUGFIX_BOT_TOKEN or None,
         )
+
+
+# @dp.error() вище реєструється лише на основному диспетчері — кожен
+# опційний бот має ВЛАСНИЙ незалежний Dispatcher (окреме дерево
+# роутингу в aiogram), тому без цього дублювання виняток у хендлері
+# дизайн-/стендап-/ідея-/багфікс-/деплой-бота ловився б лише дефолтним
+# логером aiogram (не крашив би процес — aiogram сам ізолює апдейти —
+# але й не потрапляв би в errors.log/GitHub issue, як мало б бути).
+for _dp in (bugfix_dp, deploy_dp, designer_dp, standup_dp, ideas_dp):
+    if _dp is not None:
+        _dp.error()(handle_error)
 
 
 def is_allowed_user(user_id: int) -> bool:
@@ -635,9 +647,17 @@ async def handle_free_text(message: Message):
 async def heartbeat_loop():
     """Крок 5: раз на HEARTBEAT_INTERVAL_SECONDS оновлює файл-мітку часу,
     за яким watchdog.py визначає, що бот живий (без цього — процес завис
-    би непомітно для watchdog, навіть якщо сам процес технічно виконується)."""
+    би непомітно для watchdog, навіть якщо сам процес технічно виконується).
+
+    На відміну від хендлерів команд (які aiogram сам ізолює одне від
+    одного), цей цикл — звичайна корутина всередині asyncio.gather() у
+    main(): необроблений виняток тут скасував би ВСІ інші задачі
+    (усі 6 ботів разом), тому тіло циклу обгорнуте в try/except."""
     while True:
-        HEARTBEAT_FILE.write_text(datetime.now(timezone.utc).isoformat())
+        try:
+            HEARTBEAT_FILE.write_text(datetime.now(timezone.utc).isoformat())
+        except Exception:
+            log.exception("heartbeat_loop: не вдалось записати heartbeat.txt")
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
@@ -646,24 +666,31 @@ async def standup_loop():
     (STANDUP_TIME/STANDUP_DAYS, локальний час хоста) — і якщо так,
     шле зведення в TELEGRAM_ALERT_CHAT_ID через standup_bot (чи
     основного бота, якщо STANDUP_BOT_TOKEN не задано). last_sent
-    захищає від повторної відправки в ту саму хвилину/дату."""
+    захищає від повторної відправки в ту саму хвилину/дату.
+
+    Тіло циклу в try/except (як і heartbeat_loop/ideas_loop) — інакше
+    один Telegram-збій (напр. бота заблокували в чаті) через
+    asyncio.gather() у main() покладе всі 6 ботів разом."""
     last_sent_date = None
     target_bot = standup_bot or bot
 
     while True:
-        now = datetime.now()  # noqa: DTZ005 — навмисно локальний час хоста, не UTC
-        today_key = _WEEKDAY_KEYS[now.weekday()]
+        try:
+            now = datetime.now()  # noqa: DTZ005 — навмисно локальний час хоста, не UTC
+            today_key = _WEEKDAY_KEYS[now.weekday()]
 
-        if (
-            today_key in STANDUP_DAYS
-            and now.strftime("%H:%M") == STANDUP_TIME
-            and last_sent_date != now.date()
-        ):
-            if TELEGRAM_ALERT_CHAT_ID:
-                await target_bot.send_message(chat_id=TELEGRAM_ALERT_CHAT_ID, text=build_standup_message())
-                last_sent_date = now.date()
-            else:
-                log.warning("Час стендапу настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+            if (
+                today_key in STANDUP_DAYS
+                and now.strftime("%H:%M") == STANDUP_TIME
+                and last_sent_date != now.date()
+            ):
+                if TELEGRAM_ALERT_CHAT_ID:
+                    await target_bot.send_message(chat_id=TELEGRAM_ALERT_CHAT_ID, text=build_standup_message())
+                    last_sent_date = now.date()
+                else:
+                    log.warning("Час стендапу настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+        except Exception:
+            log.exception("standup_loop: збій під час спроби надіслати стендап")
 
         await asyncio.sleep(30)
 
@@ -674,28 +701,53 @@ async def ideas_loop():
     Europe/Kyiv) — і якщо так, шле 3 продуктові + 3 контентні ідеї в
     TELEGRAM_ALERT_CHAT_ID без запиту, кожну окремим повідомленням з
     кнопкою "Зберегти". last_sent захищає від повторної відправки в
-    той самий тиждень."""
+    той самий тиждень.
+
+    Зовнішній try/except — той самий захист, що в heartbeat_loop/
+    standup_loop: будь-яка інша (не пов'язана з лімітом Claude) помилка
+    тут не повинна класти всі 6 ботів через asyncio.gather() у main()."""
     last_sent_week = None
     target = ideas_bot or bot
 
     while True:
-        now = datetime.now(IDEAS_TIMEZONE)
-        today_key = _WEEKDAY_KEYS[now.weekday()]
-        this_week = now.isocalendar()[:2]  # (рік, номер тижня)
+        try:
+            now = datetime.now(IDEAS_TIMEZONE)
+            today_key = _WEEKDAY_KEYS[now.weekday()]
+            this_week = now.isocalendar()[:2]  # (рік, номер тижня)
 
-        if today_key == IDEAS_DAY and now.strftime("%H:%M") == IDEAS_TIME and last_sent_week != this_week:
-            if TELEGRAM_ALERT_CHAT_ID:
-                await target.send_message(
-                    chat_id=TELEGRAM_ALERT_CHAT_ID,
-                    text="💡 Щотижнева пачка ідей від ідея-агента:",
-                )
-                for text in generate_product_ideas(3):
-                    await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "product", text, target)
-                for text in generate_content_ideas(3):
-                    await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "content", text, target)
-                last_sent_week = this_week
-            else:
-                log.warning("Час розсилки ідей настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+            if today_key == IDEAS_DAY and now.strftime("%H:%M") == IDEAS_TIME and last_sent_week != this_week:
+                if TELEGRAM_ALERT_CHAT_ID:
+                    try:
+                        product_ideas = generate_product_ideas(3)
+                        content_ideas = generate_content_ideas(3)
+                    except api_usage.AnthropicLimitExceeded:
+                        # Gemini недоступний і Claude-фолбек уперся в денний
+                        # ліміт — пропускаємо цей тиждень, а не мовчки чекаємо
+                        # наступного тику циклу (last_sent_week все одно
+                        # виставляємо, щоб не ретраїти щохвилини до кінця дня).
+                        if api_usage.should_warn_once():
+                            await target.send_message(
+                                chat_id=TELEGRAM_ALERT_CHAT_ID,
+                                text=(
+                                    f"⚠️ Тижнева розсилка ідей пропущена — денний ліміт Claude API "
+                                    f"вичерпано ({api_usage.DAILY_LIMIT} викликів). Спробує знову наступного тижня."
+                                ),
+                            )
+                        last_sent_week = this_week
+                    else:
+                        await target.send_message(
+                            chat_id=TELEGRAM_ALERT_CHAT_ID,
+                            text="💡 Щотижнева пачка ідей від ідея-агента:",
+                        )
+                        for text in product_ideas:
+                            await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "product", text, target)
+                        for text in content_ideas:
+                            await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "content", text, target)
+                        last_sent_week = this_week
+                else:
+                    log.warning("Час розсилки ідей настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
+        except Exception:
+            log.exception("ideas_loop: збій під час спроби надіслати щотижневі ідеї")
 
         await asyncio.sleep(30)
 
