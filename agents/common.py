@@ -30,16 +30,25 @@ def load_product_description() -> str:
 
 
 def extract_text(response) -> str:
-    """Повертає текст першого текстового блоку відповіді Claude.
+    """Повертає текст ОСТАННЬОГО текстового блоку відповіді Claude.
 
     Деякі моделі (напр. claude-sonnet-5) можуть повертати ThinkingBlock
     першим елементом content — content[0].text напряму на них падає з
-    AttributeError. Шукаємо перший блок з type == "text" замість
-    жорсткого припущення про індекс."""
+    AttributeError, тому шукаємо блоки з type == "text" замість
+    жорсткого припущення про індекс.
+
+    Останній, а не перший: коли підключені server-side tools (напр.
+    web_search), Claude часто пише короткий текст ДО виклику tool
+    ("Пошукаю актуальні тренди..."), а фінальну відповідь — уже ПІСЛЯ
+    tool_result, окремим text-блоком. Перший блок тоді був би
+    прев'ю наміру, а не результатом."""
+    text = None
     for block in response.content:
         if getattr(block, "type", None) == "text":
-            return block.text
-    raise ValueError("У відповіді Claude немає текстового блоку")
+            text = block.text
+    if text is None:
+        raise ValueError("У відповіді Claude немає текстового блоку")
+    return text
 
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")

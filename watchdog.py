@@ -22,6 +22,7 @@ bot.py, якщо той завис чи впав, і шле алерт у Telegr
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import subprocess
 import sys
@@ -36,7 +37,22 @@ REPO_ROOT = Path(__file__).parent
 HEARTBEAT_FILE = REPO_ROOT / "heartbeat.txt"
 PID_FILE = REPO_ROOT / "bot.pid"
 WATCHDOG_HEARTBEAT_FILE = REPO_ROOT / "watchdog_heartbeat.txt"
+ERRORS_LOG = REPO_ROOT / "errors.log"
 STALE_AFTER_SECONDS = 180  # запас у 3x heartbeat-інтервал бота (60с)
+ERRORS_LOG_TAIL_LINES = 6
+
+
+def _tail_errors_log(lines: int = ERRORS_LOG_TAIL_LINES) -> str:
+    """Останні кілька рядків errors.log — НЕ весь traceback, лише хвіст,
+    де зазвичай сам тип і повідомлення винятку (напр. який конкретно
+    виклик API впав). Мета: watchdog-алерт одразу дає зачіпку "що саме
+    зламалось", а не лише факт "бот не відповідає"."""
+    if not ERRORS_LOG.exists():
+        return "(errors.log відсутній)"
+    content = ERRORS_LOG.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return "(errors.log порожній)"
+    return "\n".join(content.splitlines()[-lines:])
 
 
 def _read_heartbeat_age_seconds() -> float | None:
@@ -91,14 +107,22 @@ def check_once() -> None:
     if alive and age is not None and age < STALE_AFTER_SECONDS:
         return
 
+    # watchdog стежить лише за одним процесом — bot.py (деплой-/багфікс-
+    # крон в GitHub Actions сюди не входить, у них своє сповіщення про
+    # аварійне завершення прямо в workflow) — тому reason завжди явно
+    # називає bot.py, а не узагальнене "агент".
     if not alive:
-        reason = "процес бота не знайдено (bot.pid відсутній або процес мертвий)"
+        reason = "bot.py: процес не знайдено (bot.pid відсутній або процес мертвий)"
     elif age is None:
-        reason = "heartbeat.txt відсутній або пошкоджений"
+        reason = "bot.py: heartbeat.txt відсутній або пошкоджений"
     else:
-        reason = f"heartbeat не оновлювався {int(age)}с (bot.py, схоже, завис)"
+        reason = f"bot.py: heartbeat не оновлювався {int(age)}с (процес завис)"
 
-    notify_telegram(f"🚨 Watchdog: бот не відповідає ({reason}). Перезапускаю...")
+    last_error = html.escape(_tail_errors_log())
+    notify_telegram(
+        f"🚨 Watchdog: {reason}. Перезапускаю...\n\n"
+        f"Остання помилка з errors.log:\n<pre>{last_error}</pre>"
+    )
     try:
         restart_bot()
     except OSError as e:

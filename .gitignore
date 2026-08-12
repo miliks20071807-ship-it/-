@@ -4,6 +4,7 @@ __pycache__/
 tasks.json
 ideas.json
 api_usage.json
+orchestrator_log.jsonl
 *.log
 heartbeat.txt
 watchdog_heartbeat.txt

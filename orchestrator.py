@@ -11,6 +11,8 @@
 
 import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 from anthropic import Anthropic
 
@@ -18,6 +20,8 @@ import api_usage
 from agents.common import extract_text
 
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+LOG_FILE = Path(__file__).parent / "orchestrator_log.jsonl"
 
 # Швидка/дешева модель для класифікації наміру.
 # Для складніших агентів (деплой, багфікси) варто узяти claude-sonnet-5.
@@ -38,6 +42,22 @@ SYSTEM_PROMPT = """Ти — диспетчер команди у Telegram-бот
 """
 
 
+def _log_classification(message_text: str, intent: str) -> None:
+    """Один рядок JSON на кожне повідомлення, що пройшло через
+    classify() — timestamp, вхідний текст, розпізнаний intent. Мета:
+    раз на тиждень переглянути orchestrator_log.jsonl і побачити, де
+    саме бот сплутав намір, і на основі РЕАЛЬНИХ прикладів (не
+    здогадок) уточнити SYSTEM_PROMPT вище. Сам SYSTEM_PROMPT цей лог
+    навмисно не чіпає — рішення, що саме змінити, окреме."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "message": message_text,
+        "intent": intent,
+    }
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def classify(message_text: str) -> dict:
     """Повертає dict з ключами intent, task_text, reply."""
     response = client.messages.create(
@@ -55,9 +75,11 @@ def classify(message_text: str) -> dict:
     except json.JSONDecodeError:
         # Якщо модель раптом відповіла не JSON-ом — не валимо бота,
         # а деградуємо до звичайного чату.
-        return {"intent": "chat", "task_text": None, "reply": raw}
+        result = {"intent": "chat", "task_text": None, "reply": raw}
+    else:
+        result.setdefault("intent", "chat")
+        result.setdefault("task_text", None)
+        result.setdefault("reply", "")
 
-    result.setdefault("intent", "chat")
-    result.setdefault("task_text", None)
-    result.setdefault("reply", "")
+    _log_classification(message_text, result["intent"])
     return result
