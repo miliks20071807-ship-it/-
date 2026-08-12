@@ -8,6 +8,8 @@ orchestrator_log.jsonl
 *.log
 heartbeat.txt
 watchdog_heartbeat.txt
+standup_last_sent.txt
+ideas_last_sent.txt
 bot.pid
 *.pptx
 .venv/

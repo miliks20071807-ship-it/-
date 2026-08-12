@@ -271,6 +271,19 @@ def get_last_workflow_run(workflow_file: str) -> dict | None:
     return None
 
 
+def get_last_successful_workflow_run(workflow_file: str) -> dict | None:
+    """Останній УСПІШНИЙ запуск (conclusion=success) — на відміну від
+    get_last_workflow_run() вище (може бути й провальним/поточним) —
+    щоб /статус_агентів показувало команді дату, коли деплой-агент
+    востаннє реально відпрацював, а не просто "коли востаннє
+    запускався"."""
+    status, data = _github_request("GET", f"/actions/workflows/{workflow_file}/runs?status=success&per_page=1")
+    if status == 200 and data and data.get("workflow_runs"):
+        run_info = data["workflow_runs"][0]
+        return {"created_at": run_info["created_at"], "html_url": run_info["html_url"]}
+    return None
+
+
 def trigger_workflow_dispatch(workflow_file: str, ref: str = "main") -> tuple[bool, str]:
     """Запускає GitHub Actions workflow позачергово (workflow_dispatch),
     не чекаючи cron — використовується тегом @деплой у /задача, щоб

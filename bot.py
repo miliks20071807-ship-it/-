@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     ErrorEvent,
     FSInputFile,
@@ -40,6 +41,7 @@ import storage
 from agents.common import (
     close_pr,
     create_github_issue,
+    get_last_successful_workflow_run,
     get_last_workflow_run,
     list_open_agent_prs,
     merge_pr,
@@ -61,6 +63,13 @@ ERRORS_LOG = Path(__file__).parent / "errors.log"
 HEARTBEAT_FILE = Path(__file__).parent / "heartbeat.txt"
 PID_FILE = Path(__file__).parent / "bot.pid"
 WATCHDOG_HEARTBEAT_FILE = Path(__file__).parent / "watchdog_heartbeat.txt"
+# Мітки останньої УСПІШНОЇ відправки стендапу/ідей — деплой-агент має
+# свою історію запусків на GitHub Actions (get_last_workflow_run), а
+# стендап/ідеї живуть лише як цикли всередині bot.py, тож для
+# /статус_агентів їхню останню успішну відправку більше нізвідки
+# взяти, крім як самим її записати сюди в момент відправки.
+STANDUP_LAST_SENT_FILE = Path(__file__).parent / "standup_last_sent.txt"
+IDEAS_LAST_SENT_FILE = Path(__file__).parent / "ideas_last_sent.txt"
 HEARTBEAT_INTERVAL_SECONDS = 60
 WATCHDOG_STALE_AFTER_SECONDS = 900  # запас у 3x типовий cron-інтервал watchdog (5 хв)
 
@@ -265,57 +274,66 @@ async def send_idea_with_button(chat_id: int | str, idea_type: str, text: str, t
 async def cmd_start(message: Message):
     await message.answer(
         "Привіт! Я диспетчер команди.\n\n"
-        "/задача <текст> — додати задачу\n"
-        "/задачі — показати відкриті задачі\n"
-        "/done <id> — позначити задачу виконаною\n"
-        "/презентація [днів|all] — звіт по задачах команди (pptx)\n"
-        "/дизайн <опис> — HTML-мокап екрана продукту\n"
-        "/дизайн_презентація <опис ідеї> — pptx-пітч нової ідеї\n"
-        "/стендап — зведення по задачах + запрошення на стендап (і щодня автоматично)\n"
-        "/ідея_продукт — 5 продуктових ідей\n"
-        "/ідея_контент — 5 ідей для Reels/TikTok\n"
-        "/ідеї_збережені — список збережених ідей (і щотижня автоматично 3+3)\n"
-        "/статус_агентів — стан деплой-агента, відкритих PR і watchdog\n"
-        "/допомога — повний список команд по кожному боту окремо\n\n"
-        "Або просто напиши повідомлення — я сам розберусь, задача це чи ні."
+        "Напишіть /help — там повний список того, що я вмію, "
+        "згрупований по категоріях.\n\n"
+        "Або просто напишіть звичайне повідомлення — я сам розберусь, "
+        "задача це чи ні."
     )
 
 
-@dp.message(Command("допомога"))
+@dp.message(Command("допомога", "help"))
 async def cmd_help(message: Message):
-    """Повний список команд по кожному боту — теги @дизайн/@багфікс/@деплой
-    у /задача підмінюють необхідність писати в кожен бот окремо, тож тут
+    """Перша команда, яку варто побачити будь-кому в команді (2-5 людей),
+    хто вперше пише боту — тому й /help: єдина команда системи, що
+    складається лише з латиниці, тож саме вона (не решта, кирилична)
+    з'являється в меню Telegram (setMyCommands у main() нижче вимагає
+    латиниці/цифр/підкреслень — Cyrillic-команди туди просто не
+    приймаються, хоч і чудово працюють, якщо їх набрати вручну).
+
+    Групування — за категоріями, а не по ботах: людині, що просто
+    користується системою, не важливо, який саме бот відповідає,
+    важливо — що вводити і навіщо. Теги @дизайн/@багфікс/@деплой у
+    /задача підмінюють необхідність писати в кожен бот окремо, тож тут
     же й пояснюємо цей ярлик."""
     await message.answer(
-        "📋 Усі команди системи, по ботах:\n\n"
-        "🗂 Диспетчер (цей бот):\n"
+        "📋 Усі команди бота, по категоріях:\n\n"
+        "📝 Задачі:\n"
         "/задача <текст> — додати задачу (теги @дизайн/@багфікс/@деплой "
         "на початку тексту одразу викликають агента)\n"
-        "/задачі — відкриті задачі\n"
+        "/задачі — показати відкриті задачі\n"
         "/done <id> — позначити задачу виконаною\n"
-        "/презентація [днів|all] — pptx-звіт по задачах команди\n"
-        "/статус_агентів — стан усіх агентів, відкриті PR, watchdog\n"
-        "вільний текст без команди — Claude сам визначить, задача це чи ні\n\n"
-        "🐛 Багфікс-бот — своїх команд немає, лише сповіщення про знайдені "
-        "баги й пропозиції фіксу з кнопками Затвердити/Відхилити\n\n"
-        "🚀 Деплой-бот — своїх команд немає, лише сповіщення про прогрес "
-        "деплою й PR з кнопками підтвердження (тривіальні фікси мерджаться "
-        "автоматично)\n\n"
-        "🎨 Дизайн-бот:\n"
+        "вільний текст без команди — я сам визначу, задача це чи ні\n\n"
+        "🎨 Дизайн (пишіть у чат дизайн-бота):\n"
         "/дизайн <опис екрана> — HTML-мокап екрана продукту файлом\n"
         "/дизайн_презентація <опис ідеї> — pptx-пітч нової ідеї "
         "(проблема/рішення/як працює/наступні кроки)\n\n"
-        "📅 Стендап-бот:\n"
+        "📅 Стендап (пишіть у чат стендап-бота):\n"
         "/стендап — зведення по задачах і відкритих PR "
         "(і щодня автоматично о " + STANDUP_TIME + " у " + ",".join(sorted(STANDUP_DAYS)) + ")\n\n"
-        "💡 Ідея-бот:\n"
+        "💡 Ідеї (пишіть у чат ідея-бота):\n"
         "/ідея_продукт — 5 продуктових ідей\n"
         "/ідея_контент — 5 ідей для Reels/TikTok\n"
         "/ідеї_збережені — список збережених ідей "
         f"(і щотижня автоматично {IDEAS_DAY} {IDEAS_TIME}, {IDEAS_TIMEZONE.key})\n\n"
-        "Команди дизайн/стендап/ідея-бота треба набирати саме в тому чаті, "
+        "📊 Презентації:\n"
+        "/презентація [днів|all] — pptx-звіт по задачах команди\n\n"
+        "🔍 Статус агентів:\n"
+        "/статус_агентів — стан деплой-агента (+ дата останнього успішного "
+        "запуску), стендапу, ідей, відкриті PR, watchdog\n\n"
+        "🐛🚀📝 Фонові агенти без команд (лише сповіщення в чат, дій від вас "
+        "не потребують, крім кнопок):\n"
+        "Багфікс-бот — знайдені баги й пропозиції фіксу з кнопками "
+        "Затвердити/Відхилити\n"
+        "Деплой-бот — прогрес деплою й PR з кнопками підтвердження "
+        "(тривіальні фікси мерджаться автоматично)\n"
+        "Рев'ю-бот — автоматичне рев'ю PR деплой-/багфікс-агента (коментар "
+        "прямо в PR на GitHub)\n"
+        "Changelog-бот — \"що нового\" одним повідомленням після кожного "
+        "змерджованого PR\n\n"
+        "Команди дизайн-/стендап-/ідея-бота треба набирати саме в тому чаті, "
         "що представляє цього агента — крім /задача @тег, який якраз і "
-        "замінює необхідність писати в кожен бот окремо."
+        "замінює необхідність писати в кожен бот окремо.\n\n"
+        "Детальніше про повсякденну роботу з ботом — дивіться TEAM_GUIDE.md."
     )
 
 
@@ -558,6 +576,19 @@ def _file_age_seconds(path: Path) -> float | None:
     return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
+def _last_sent_label(path: Path) -> str:
+    """Читає мітку останньої успішної відправки, записану самим
+    циклом (standup_loop/ideas_loop), у зручний для читання рядок."""
+    if not path.exists():
+        return "ще не надсилалось на цьому хості"
+    raw = path.read_text().strip()
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw or "невідомо"
+    return ts.strftime("%Y-%m-%d %H:%M")
+
+
 @dp.message(Command("статус_агентів"))
 async def cmd_agents_status(message: Message):
     """Крок з доповнення архітектури: короткий звіт по всій системі
@@ -573,8 +604,16 @@ async def cmd_agents_status(message: Message):
             f"🚀 Деплой-агент: останній запуск {last_run['created_at']} — "
             f"{last_run['conclusion'] or last_run['status']}"
         )
+        last_success = get_last_successful_workflow_run(DEPLOY_WORKFLOW_FILE)
+        if last_success:
+            lines.append(f"   ✅ останній УСПІШНИЙ запуск: {last_success['created_at']}")
+        else:
+            lines.append("   ✅ успішних запусків ще не було")
     else:
         lines.append("🚀 Деплой-агент: даних немає (перевір GITHUB_TOKEN/GITHUB_REPOSITORY на боті)")
+
+    lines.append(f"📅 Стендап-агент: остання успішна відправка — {_last_sent_label(STANDUP_LAST_SENT_FILE)}")
+    lines.append(f"💡 Ідея-агент: остання успішна відправка — {_last_sent_label(IDEAS_LAST_SENT_FILE)}")
 
     open_prs = list_open_agent_prs()
     if open_prs:
@@ -687,6 +726,7 @@ async def standup_loop():
                 if TELEGRAM_ALERT_CHAT_ID:
                     await target_bot.send_message(chat_id=TELEGRAM_ALERT_CHAT_ID, text=build_standup_message())
                     last_sent_date = now.date()
+                    STANDUP_LAST_SENT_FILE.write_text(now.isoformat())
                 else:
                     log.warning("Час стендапу настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
         except Exception:
@@ -744,6 +784,7 @@ async def ideas_loop():
                         for text in content_ideas:
                             await send_idea_with_button(TELEGRAM_ALERT_CHAT_ID, "content", text, target)
                         last_sent_week = this_week
+                        IDEAS_LAST_SENT_FILE.write_text(now.isoformat())
                 else:
                     log.warning("Час розсилки ідей настав, але TELEGRAM_ALERT_CHAT_ID не задано — нікуди слати.")
         except Exception:
@@ -755,6 +796,14 @@ async def ideas_loop():
 async def main():
     log.info("Бот запущено, чекаю повідомлень...")
     PID_FILE.write_text(str(os.getpid()))
+
+    # Telegram-меню команд (кнопка "/" у чаті) приймає лише латиницю/
+    # цифри/підкреслення — усі інші команди системи кириличні й туди
+    # просто не пройдуть, хоч і чудово працюють, якщо набрати вручну.
+    # /help — єдина команда-виняток, тому саме вона й стає тим, що
+    # людина, яка вперше пише боту, бачить одразу в меню, не знаючи
+    # заздалегідь жодної команди.
+    await bot.set_my_commands([BotCommand(command="help", description="Усі команди бота — почніть тут")])
 
     tasks = [heartbeat_loop(), standup_loop(), ideas_loop(), dp.start_polling(bot)]
     if bugfix_bot is not None:
