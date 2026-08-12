@@ -15,7 +15,12 @@ env:
   # заданий — падає назад на звичайного TELEGRAM_BOT_TOKEN.
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_DEPLOY_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # GH_PAT (не автоматичний secrets.GITHUB_TOKEN) — інакше відкритий/
+  # змерджений тут PR не тригерне review-agent.yml/changelog-agent.yml:
+  # GitHub навмисно не запускає інші workflow на події, створені
+  # автоматичним токеном (той самий трюк, що вже був потрібен у ci.yml
+  # для тригера bugfix-agent.yml).
+  GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
 

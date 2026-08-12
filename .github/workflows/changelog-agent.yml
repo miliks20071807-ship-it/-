@@ -1,0 +1,84 @@
+name: Changelog agent
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+env:
+  # Сповіщення changelog-агента йдуть від окремого "changelog-бота".
+  # Якщо секрет TELEGRAM_CHANGELOG_BOT_TOKEN не заданий — падає назад
+  # на звичайного TELEGRAM_BOT_TOKEN.
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_CHANGELOG_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  changelog:
+    # Лише реально змерджені PR — pull_request:closed файрить і на
+    # просте закриття без мерджу (напр. кнопка "Відхилити").
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: git identity
+        run: |
+          git config user.name "changelog-agent"
+          git config user.email "changelog-agent@users.noreply.github.com"
+
+      # Раннер ефемерний — без кешу "денний" лічильник Claude API
+      # обнулявся б на кожному запуску (див. api_usage.py).
+      - name: Кеш лічильника Anthropic API
+        uses: actions/cache@v4
+        with:
+          path: api_usage.json
+          key: api-usage-${{ github.run_id }}
+          restore-keys: |
+            api-usage-
+
+      - name: Згенерувати запис і закомітити в CHANGELOG.md
+        id: changelog
+        run: python agents/changelog_agent.py generate "${PR_NUMBER}"
+
+      - name: "Telegram: пропущено через денний ліміт Anthropic API"
+        if: steps.changelog.outputs.skipped == 'true' && steps.changelog.outputs.should_warn == 'true'
+        continue-on-error: true
+        env:
+          LIMIT: ${{ env.ANTHROPIC_DAILY_CALL_LIMIT }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "⚠️ Changelog-агент: пропустив PR #${PR_NUMBER} — денний ліміт Claude API вичерпано (${LIMIT} викликів). CHANGELOG.md не оновлено."
+
+      - name: "Telegram: changelog готовий"
+        if: steps.changelog.outputs.skipped == 'false'
+        continue-on-error: true
+        env:
+          CHANGELOG_TEXT: ${{ steps.changelog.outputs.changelog_text }}
+          PR_URL: ${{ steps.changelog.outputs.pr_url }}
+        run: |
+          TEXT="📝 Що нового (PR #${PR_NUMBER}):
+          ${CHANGELOG_TEXT}
+
+          ${PR_URL}"
+          bash .github/scripts/telegram_notify.sh text "$TEXT"
+
+      - name: "Telegram: аварійне завершення"
+        if: failure()
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔥 Changelog-агент завершився з помилкою на PR #${PR_NUMBER}. Деталі: ${RUN_URL}"

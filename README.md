@@ -41,10 +41,13 @@ watchdog.py (окремо, cron) — пінгує bot.py, перезапуска
 - `agents/common.py` — спільне: Telegram-алерти, GitHub REST helpers (merge/close PR, issue, статус/запуск workflow), `call_groq`/`call_gemini` (безкоштовні API), `load_product_description()` — і для крон-агентів, і для bot.py
 - `agents/deploy_agent.py` — деплой-агент (крок 2), підкоманди autofix/test/open-pr/merge-pr
 - `agents/bugfix_agent.py` — багфікс-агент (крок 3), підкоманди propose/test/open-pr
+- `agents/review_agent.py` — рев'ю-агент (крок 10), підкоманда review
+- `agents/changelog_agent.py` — changelog-агент (крок 11), підкоманда generate
+- `CHANGELOG.md` — людською мовою, генерує/дописує `agents/changelog_agent.py`
 - `api_usage.py` — денний лічильник/ліміт викликів Claude API (крок 8), JSON-файл `api_usage.json`
 - `watchdog.py` — health-check процес (крок 5)
 - `backup.py` — щоденний бекап tasks.json/ideas.json у гілку `backup` (крок 9)
-- `.github/workflows/` — крони й тригери для деплой-, багфікс-агентів і CI
+- `.github/workflows/` — крони й тригери для деплой-, багфікс-, рев'ю-, changelog-агентів і CI
 - `.github/scripts/telegram_notify.sh` — curl-сповіщення в Telegram прямо з кроків workflow (текст + кнопки підтвердження)
 - `tests/` — pytest-тести (потрібні, щоб деплой-агенту й CI було що ганяти)
 
@@ -67,18 +70,35 @@ ruff check .
 pytest -q
 ```
 
-## Налаштування репозиторію на GitHub (потрібне для кроків 2-3)
+## Налаштування репозиторію на GitHub (потрібне для кроків 2-3, 10-11)
 
 1. Запуште цей репозиторій на GitHub.
-2. Settings → Secrets and variables → Actions → додайте:
+2. Settings → Secrets and variables → Actions → **Secrets** → додайте:
    `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALERT_CHAT_ID`.
-3. Settings → Actions → General → "Workflow permissions" → увімкніть
+   Опційно (окрема ідентичність у Telegram для рев'ю-/changelog-агента —
+   без цього сповіщення йдуть через `TELEGRAM_BOT_TOKEN`, нічого не
+   ламається): `TELEGRAM_REVIEW_BOT_TOKEN`, `TELEGRAM_CHANGELOG_BOT_TOKEN`.
+   На відміну від дизайн-/стендап-/ідея-бота ці два **не** реєструються
+   в `bot.py` — у них немає інтерактивних команд/кнопок, лише
+   односторонні сповіщення з GitHub Actions через curl.
+3. **`GH_PAT`** (Secrets) — персональний access token з правами
+   `repo`/`Pull requests: write`. Потрібен, бо автоматичний
+   `secrets.GITHUB_TOKEN` не може тригернути ІНШИЙ workflow (свідоме
+   обмеження GitHub): без `GH_PAT` PR, відкритий `deploy_agent.py`/
+   `bugfix_agent.py`, не запустить `review-agent.yml`, а автомердж
+   трив­іального PR не запустить `changelog-agent.yml`. Якщо `GH_PAT`
+   не задано — усе решта (сам деплой/багфікс) все одно працює, просто
+   рев'ю й changelog для цих PR не спрацюють.
+4. Settings → Secrets and variables → Actions → **Variables** (не
+   Secrets — не чутливе значення) → опційно `ANTHROPIC_DAILY_CALL_LIMIT`
+   (дефолт 200, якщо не задати — див. "Крок 8").
+5. Settings → Actions → General → "Workflow permissions" → увімкніть
    *Read and write permissions* і *Allow GitHub Actions to create and
    approve pull requests* — інакше `deploy_agent.py`/`bugfix_agent.py`
-   не зможуть пушити гілки й відкривати PR через `GITHUB_TOKEN`.
-4. Створіть лейбл `bug` у репозиторії (Issues → Labels), якщо його
+   не зможуть пушити гілки й відкривати PR.
+6. Створіть лейбл `bug` у репозиторії (Issues → Labels), якщо його
    нема — на нього зав'язаний тригер багфікс-агента.
-5. У `.env` бота (не в GitHub secrets — це для процесу на вашому
+7. У `.env` бота (не в GitHub secrets — це для процесу на вашому
    хості) заповніть `GITHUB_TOKEN`/`GITHUB_REPOSITORY` з правами
    `Issues: write`, `Pull requests: write`, `Actions: read+write`
    (write — для тега `@деплой`, що запускає workflow позачергово) —
@@ -424,6 +444,79 @@ worktree`, який видаляється одразу після коміту 
 `git log backup --oneline` — показати історію бекапів;
 `git show backup:tasks.json` — вміст останнього бекапу.
 
+## Крок 10 — Рев'ю-агент
+
+`agents/review_agent.py` (підкоманда `review`) +
+`.github/workflows/review-agent.yml` (тригер: `pull_request: opened`,
+з фільтром `startsWith(github.head_ref, 'deploy-agent/')` чи
+`'bugfix-agent/'` — людські PR не в скоупі, рішення команди).
+
+Claude отримує заголовок PR і повний diff, шукає очевидні баги,
+проблеми стилю й потенційні security-діри (захардкожені секрети,
+SQL-ін'єкції, відсутню валідацію вводу) і відповідає структурованим
+списком зауважень. Рев'ю-агент **ніколи не блокує й не мерджить** —
+лишає коментар прямо в PR на GitHub (`gh pr comment`) і дублює коротке
+зведення в Telegram ("Рев'ю PR #12: 2 зауваження(-нь), деталі в PR").
+Людина все одно тисне "Затвердити"/"Відхилити" сама.
+
+**Рішення команди:** перевіряються навіть тривіальні PR деплой-агента
+(ті, що автомерджаться без людини) — саме автомердж є єдиним шляхом у
+системі без живих очей між кодом і продом, тож автоматичний рев'ю там
+дає найбільшу реальну користь, а не найменшу.
+
+Гейтиться тим самим денним лімітом Claude API, що й деплой-/багфікс-
+агент (крок 8) — при вичерпанні пропускає перевірку з одним
+попередженням у Telegram замість PR-коментаря.
+
+**Технічна деталь:** щоб PR, відкритий `deploy_agent.py`/
+`bugfix_agent.py`, взагалі тригернув цей workflow, `GH_TOKEN` у
+`deploy-agent.yml`/`bugfix-agent.yml` довелось перевести з
+автоматичного `secrets.GITHUB_TOKEN` на `secrets.GH_PAT ||
+secrets.GITHUB_TOKEN` (див. "Налаштування репозиторію на GitHub" —
+той самий трюк, що вже був потрібен у `ci.yml` для тригера
+`bugfix-agent.yml`; автоматичний токен навмисно не запускає інші
+workflow).
+
+**Як перевірити:**
+- Локально без реального PR: `python agents/review_agent.py review
+  <номер-PR>` (потребує `gh auth` і реальний PR у репозиторії).
+- Наживо: дочекайтесь, поки деплой- чи багфікс-агент відкриє PR (чи
+  запустіть один із них вручну) — коментар з'явиться прямо в PR на
+  GitHub, а коротке зведення прийде в Telegram.
+
+## Крок 11 — Changelog-агент
+
+`agents/changelog_agent.py` (підкоманда `generate`) +
+`.github/workflows/changelog-agent.yml` (тригер: `pull_request:
+closed`, з перевіркою `github.event.pull_request.merged == true` —
+просте закриття без мерджу, напр. кнопкою "Відхилити", нічого не
+запускає). На відміну від рев'ю-агента — без фільтра за гілкою,
+спрацьовує на будь-який змерджений PR (людський, деплой-, багфікс-
+агента).
+
+Claude отримує заголовок PR, повідомлення комітів і diff та формулює
+1-4 пункти змін **людською мовою**, орієнтованою на нетехнічну людину
+("Додано швидке додавання задач через тег @дизайн"), а не технічний
+опис diff'а. Якщо зміна суто внутрішня (рефакторинг, лінт) — агент
+чесно пише "без видимих змін для користувача", а не вигадує ефект.
+
+Результат: (1) той самий текст іде одним повідомленням у Telegram,
+(2) допис­ується в `CHANGELOG.md` в `main` — прямим комітом від імені
+`changelog-agent`, найновіші записи зверху (без окремого PR, це
+одноразовий допис у файл, не зміна коду).
+
+Гейтиться тим самим денним лімітом Claude API — при вичерпанні
+пропускає прогін з одним попередженням, `CHANGELOG.md` лишається без
+змін.
+
+**Як перевірити:**
+- Локально: `python agents/changelog_agent.py generate <номер-PR>`
+  (допише `CHANGELOG.md` і закомітить локально; `git push` вимагає
+  реальний remote з правом push).
+- Наживо: дочекайтесь мерджу будь-якого PR (людського чи агентського) —
+  у Telegram прийде "Що нового", а в `CHANGELOG.md` на `main` з'явиться
+  новий запис зверху.
+
 ## Мульти-бот система і теги агентів
 
 Кожен агент (крім задач/презентацій, які лишились у диспетчера)
@@ -471,11 +564,12 @@ PR звідти ще чекають підтвердження, в одному 
 | Секрет | Де | Навіщо |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` + 5 опційних `TELEGRAM_*_BOT_TOKEN` | `.env` (хост бота) **і** GitHub Actions secrets (`TELEGRAM_DEPLOY_BOT_TOKEN`/`TELEGRAM_BUGFIX_BOT_TOKEN`, з фолбеком на `TELEGRAM_BOT_TOKEN`) | Ідентичність ботів у Telegram |
-| `ANTHROPIC_API_KEY` | `.env` **і** GitHub Actions secrets | Claude API (bot.py + деплой-/багфікс-агент) |
+| `TELEGRAM_REVIEW_BOT_TOKEN`, `TELEGRAM_CHANGELOG_BOT_TOKEN` (опційно) | лише GitHub Actions secrets | Ідентичність рев'ю-/changelog-бота в Telegram; на відміну від інших ботів **не** реєструються в `bot.py` — лише односторонні сповіщення з workflow, без інтерактивних команд/кнопок |
+| `ANTHROPIC_API_KEY` | `.env` **і** GitHub Actions secrets | Claude API (bot.py + деплой-/багфікс-/рев'ю-/changelog-агент) |
 | `GROQ_API_KEY`, `GEMINI_API_KEY` | лише `.env` | Безкоштовні тарифи (дизайн-/ідея-/пітч-агент викликаються тільки з bot.py, не з Actions) |
 | `GITHUB_TOKEN` (у `.env`, персональний PAT) | лише `.env` | Щоб bot.py міг мерджити/закривати PR і відкривати issue напряму з Telegram (кнопки, `/статус_агентів`) |
-| `GH_PAT` (опційно) | лише GitHub Actions secrets | Фолбек для `secrets.GITHUB_TOKEN` у `ci.yml` — авто-токен Actions не може тригернути інший workflow (GitHub-обмеження), реальний PAT може |
-| `secrets.GITHUB_TOKEN` в Actions-workflow-ах | нікуди не зберігається — GitHub сам видає й гасить його на кожен запуск job'а | Git push/PR-операції всередині деплой-/багфікс-агента |
+| `GH_PAT` | лише GitHub Actions secrets | Фолбек для `secrets.GITHUB_TOKEN` у `ci.yml`, `deploy-agent.yml`, `bugfix-agent.yml` — авто-токен Actions навмисно не може тригернути інший workflow (GitHub-обмеження), реальний PAT може. Без нього PR деплой-/багфікс-агента не тригерне рев'ю-/changelog-агента (крок 10-11) |
+| `secrets.GITHUB_TOKEN` в Actions-workflow-ах | нікуди не зберігається — GitHub сам видає й гасить його на кожен запуск job'а | Git push/PR-операції всередині деплой-/багфікс-/changelog-агента |
 
 `.env` існує лише на хості, де запущено `bot.py`, і в `.gitignore` (аудит цього репозиторію підтвердив: жодного разу не потрапляв у git-історію). GitHub Actions secrets — Settings → Secrets and variables → Actions → **Secrets**; `ANTHROPIC_DAILY_CALL_LIMIT` там-таки, але в **Variables** (не Secrets — це не чутливе значення).
 

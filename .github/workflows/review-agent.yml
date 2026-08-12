@@ -1,0 +1,81 @@
+name: Review agent
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  # Сповіщення рев'ю-агента йдуть від окремого "рев'ю-бота" (своя
+  # ідентичність у Telegram). Якщо секрет TELEGRAM_REVIEW_BOT_TOKEN не
+  # заданий — падає назад на звичайного TELEGRAM_BOT_TOKEN.
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_REVIEW_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  review:
+    # Лише PR, відкриті деплой-/багфікс-агентом (за префіксом гілки) —
+    # людські PR не в скоупі цього агента (рішення команди). Рев'ю
+    # тривіальних PR деплой-агента теж входить сюди навмисно: автомердж
+    # — єдиний шлях у системі без живої людини між кодом і продом.
+    if: startsWith(github.head_ref, 'deploy-agent/') || startsWith(github.head_ref, 'bugfix-agent/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      # Раннер ефемерний — без кешу "денний" лічильник Claude API
+      # обнулявся б на кожному запуску (див. api_usage.py).
+      - name: Кеш лічильника Anthropic API
+        uses: actions/cache@v4
+        with:
+          path: api_usage.json
+          key: api-usage-${{ github.run_id }}
+          restore-keys: |
+            api-usage-
+
+      - name: "Telegram: почав рев'ю"
+        continue-on-error: true
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔍 Рев'ю-агент почав перевірку PR #${PR_NUMBER}"
+
+      - name: Рев'ю PR
+        id: review
+        run: python agents/review_agent.py review "${PR_NUMBER}"
+
+      - name: "Telegram: пропущено через денний ліміт Anthropic API"
+        if: steps.review.outputs.skipped == 'true' && steps.review.outputs.should_warn == 'true'
+        continue-on-error: true
+        env:
+          LIMIT: ${{ env.ANTHROPIC_DAILY_CALL_LIMIT }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "⚠️ Рев'ю-агент: пропустив перевірку PR #${PR_NUMBER} — денний ліміт Claude API вичерпано (${LIMIT} викликів)."
+
+      - name: "Telegram: рев'ю готове"
+        if: steps.review.outputs.skipped == 'false'
+        continue-on-error: true
+        env:
+          PR_URL: ${{ steps.review.outputs.pr_url }}
+          ISSUE_COUNT: ${{ steps.review.outputs.issue_count }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔍 Рев'ю PR #${PR_NUMBER}: ${ISSUE_COUNT} зауваження(-нь), деталі в PR: ${PR_URL}"
+
+      - name: "Telegram: аварійне завершення"
+        if: failure()
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash .github/scripts/telegram_notify.sh text "🔥 Рев'ю-агент завершився з помилкою на PR #${PR_NUMBER}. Деталі: ${RUN_URL}"

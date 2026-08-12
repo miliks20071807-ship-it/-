@@ -16,7 +16,9 @@ env:
   # TELEGRAM_BOT_TOKEN, нічого не ламається.
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BUGFIX_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # GH_PAT — щоб відкритий тут PR тригернув review-agent.yml (той
+  # самий трюк, що й у deploy-agent.yml — див. коментар там).
+  GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   ANTHROPIC_DAILY_CALL_LIMIT: ${{ vars.ANTHROPIC_DAILY_CALL_LIMIT || '200' }}
   ISSUE_NUMBER: ${{ github.event.issue.number }}
